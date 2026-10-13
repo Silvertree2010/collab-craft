@@ -1,3 +1,36 @@
+[workspace]
+members = [".", "crates/nextcloud", "crates/collab", "crates/cloud-client", "crates/share-backend"]
+
+# What the moved crates inherit. They were written against a workspace root
+# and they keep working against this one.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/wdunn001/collabcraft"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+# The contracts come from craft-libs, pinned. Everything that reaches a
+# wire lives here, beside the service that calls it.
+[workspace.dependencies]
+craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "889fe8a" }
+craft-collab = { path = "crates/collab" }
+craft-cloud-client = { path = "crates/cloud-client" }
+craft-nextcloud = { path = "crates/nextcloud" }
+collabcraft-share = { path = "crates/share-backend" }
+log = "0.4"
+quick-xml = "0.41"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
 [package]
 name = "collabcraft-relay"
 version = "0.1.0"
@@ -20,8 +53,8 @@ todo = "warn"
 
 [dependencies]
 axum = "0.8"
-craft-cloud = { path = "../craft-libs/crates/cloud" }
-craft-nextcloud = { path = "../craft-libs/crates/nextcloud" }
+craft-cloud = { workspace = true }
+craft-nextcloud = { workspace = true }
 # The identity provider and the cloud provider are both reached over HTTP. The
 # blocking client is for the provider contracts, which are synchronous and run
 # on a blocking thread.
