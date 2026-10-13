@@ -1,0 +1,17 @@
+[package]
+name = "collabcraft-share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A craft-ui share backend that reaches the CollabCraft service"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The dialog's contract. No transport comes with it, which is the point.
+craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "889fe8a", features = ["share"] }
+craft-cloud = { workspace = true }
+craft-cloud-client = { workspace = true }
