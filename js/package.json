@@ -1,0 +1,19 @@
+{
+  "name": "collabcraft-files",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Open in … entries CollabCraft adds to the Nextcloud Files app",
+  "scripts": {
+    "build": "esbuild src/files.js --bundle --minify --format=iife --target=es2020 --outfile=../js/collabcraft-files.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "dependencies": {
+    "@nextcloud/axios": "^2.5.0",
+    "@nextcloud/files": "^3.10.0",
+    "@nextcloud/initial-state": "^2.2.0",
+    "@nextcloud/l10n": "^3.1.0",
+    "@nextcloud/router": "^3.0.1"
+  }
+}

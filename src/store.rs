@@ -1,0 +1,212 @@
+//! Sessions and provider links, on the Valkey the estate already runs.
+//!
+//! No new datastore. Both kinds of record are small, both expire, and both are
+//! wanted by every relay instance, which is exactly what this bus is for.
+//!
+//! A provider link holds a credential, so it is written with an expiry and
+//! read only by this process. It never reaches a client: a client gets answers
+//! from the API, never the means to produce them itself.
+
+use redis::AsyncCommands;
+use serde::{Deserialize, Serialize};
+
+/// How long a signed-in session lasts without being refreshed.
+const SESSION_TTL_SECS: u64 = 12 * 60 * 60;
+/// How long a linked provider credential is kept.
+///
+/// Long, because relinking means a browser round trip the user did not ask
+/// for. An app password is revocable at the provider, which is the real
+/// control.
+const LINK_TTL_SECS: u64 = 90 * 24 * 60 * 60;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProviderLink {
+    /// The account name at the provider, which need not match the CollabCraft
+    /// user: somebody may sign in with one identity and link another account.
+    pub user: String,
+    /// A device-scoped app password, revocable on its own at the provider.
+    /// Never the account password.
+    pub password: String,
+}
+
+#[derive(Clone)]
+pub struct Store {
+    client: redis::Client,
+    prefix: String,
+}
+
+impl Store {
+    pub fn new(url: &str, prefix: impl Into<String>) -> Result<Store, String> {
+        let client = redis::Client::open(url).map_err(|e| e.to_string())?;
+        Ok(Store { client, prefix: prefix.into() })
+    }
+
+    async fn conn(&self) -> Option<redis::aio::MultiplexedConnection> {
+        match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::error!(error = %e, "the bus is unreachable");
+                None
+            }
+        }
+    }
+
+    fn session_key(&self, id: &str) -> String {
+        format!("{}:session:{id}", self.prefix)
+    }
+
+    fn link_key(&self, user: &str) -> String {
+        format!("{}:link:{user}", self.prefix)
+    }
+
+    pub async fn put_session(&self, id: &str, session: &crate::session::Session) -> bool {
+        let Some(mut c) = self.conn().await else { return false };
+        let Ok(body) = serde_json::to_string(session) else { return false };
+        if c.set_ex::<_, _, ()>(self.session_key(id), body, SESSION_TTL_SECS).await.is_err() {
+            return false;
+        }
+        // Indexed by user so signing out can end every session this person
+        // has, not only the one whose cookie happens to be in hand.
+        let index = self.user_sessions_key(&session.user);
+        let _ = c.sadd::<_, _, ()>(&index, id).await;
+        let _ = c.expire::<_, ()>(&index, SESSION_TTL_SECS as i64).await;
+        true
+    }
+
+    fn user_sessions_key(&self, user: &str) -> String {
+        format!("{}:usersessions:{user}", self.prefix)
+    }
+
+    /// End every session this user holds.
+    pub async fn drop_sessions_for(&self, user: &str) {
+        let Some(mut c) = self.conn().await else { return };
+        let index = self.user_sessions_key(user);
+        let ids: Vec<String> = c.smembers(&index).await.unwrap_or_default();
+        for id in ids {
+            let _ = c.del::<_, ()>(self.session_key(&id)).await;
+        }
+        let _ = c.del::<_, ()>(&index).await;
+    }
+
+    pub async fn session(&self, id: &str) -> Option<crate::session::Session> {
+        let mut c = self.conn().await?;
+        let body: String = c.get(self.session_key(id)).await.ok()?;
+        serde_json::from_str(&body).ok()
+    }
+
+    pub async fn put_provider_link(&self, user: &str, link: &ProviderLink) -> bool {
+        let Some(mut c) = self.conn().await else { return false };
+        let Ok(body) = serde_json::to_string(link) else { return false };
+        c.set_ex::<_, _, ()>(self.link_key(user), body, LINK_TTL_SECS).await.is_ok()
+    }
+
+    pub async fn provider_link(&self, user: &str) -> Option<ProviderLink> {
+        let mut c = self.conn().await?;
+        let body: String = c.get(self.link_key(user)).await.ok()?;
+        serde_json::from_str(&body).ok()
+    }
+
+    pub async fn drop_provider_link(&self, user: &str) {
+        if let Some(mut c) = self.conn().await {
+            let _ = c.del::<_, ()>(self.link_key(user)).await;
+        }
+    }
+}
+
+/// A half-finished attempt to link a cloud account.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LinkFlow {
+    /// Who started it. Checked on completion, so a handle cannot be redeemed
+    /// by whoever happens to hold it.
+    pub user: String,
+    pub endpoint: String,
+    pub token: String,
+}
+
+/// How long an unfinished sign-in or link attempt is kept.
+///
+/// Short. These are in-flight state, and one left lying around is a handle
+/// somebody else could present.
+const PENDING_TTL_SECS: u64 = 10 * 60;
+
+impl Store {
+    fn pending_key(&self, state: &str) -> String {
+        format!("{}:pending:{state}", self.prefix)
+    }
+
+    fn device_key(&self, code: &str) -> String {
+        format!("{}:device:{code}", self.prefix)
+    }
+
+    fn link_flow_key(&self, handle: &str) -> String {
+        format!("{}:linkflow:{handle}", self.prefix)
+    }
+
+    /// Remember that we issued this `state`, and what it was for.
+    pub async fn put_pending(&self, state: &str, kind: &str) {
+        if let Some(mut c) = self.conn().await {
+            let _ = c.set_ex::<_, _, ()>(self.pending_key(state), kind, PENDING_TTL_SECS).await;
+        }
+    }
+
+    /// Consume a `state`. Returns `None` when it was never issued or has
+    /// already been used, which is what makes it single-use.
+    pub async fn take_pending(&self, state: &str) -> Option<String> {
+        let mut c = self.conn().await?;
+        let key = self.pending_key(state);
+        let kind: Option<String> = c.get(&key).await.ok()?;
+        let _ = c.del::<_, ()>(&key).await;
+        kind
+    }
+
+    /// Park a device sign-in, not yet completed.
+    pub async fn put_device(&self, code: &str) {
+        if let Some(mut c) = self.conn().await {
+            let _ = c.set_ex::<_, _, ()>(self.device_key(code), "", PENDING_TTL_SECS).await;
+        }
+    }
+
+    /// Attach a session to a device sign-in, once the browser is done.
+    pub async fn complete_device(&self, code: &str, session_id: &str) {
+        if let Some(mut c) = self.conn().await {
+            let _ = c.set_ex::<_, _, ()>(self.device_key(code), session_id, PENDING_TTL_SECS).await;
+        }
+    }
+
+    /// Poll a device sign-in.
+    ///
+    /// The nesting is the answer. `None` means the code is unknown or expired,
+    /// `Some(None)` means still waiting, `Some(Some(id))` means done. A client
+    /// has to tell those apart: one is fatal and one is normal.
+    pub async fn take_device(&self, code: &str) -> Option<Option<String>> {
+        let mut c = self.conn().await?;
+        let key = self.device_key(code);
+        let value: Option<String> = c.get(&key).await.ok()?;
+        let value = value?;
+        if value.is_empty() {
+            return Some(None);
+        }
+        let _ = c.del::<_, ()>(&key).await;
+        Some(Some(value))
+    }
+
+    pub async fn put_link_flow(&self, handle: &str, user: &str, endpoint: &str, token: &str) {
+        let Some(mut c) = self.conn().await else { return };
+        let flow = LinkFlow { user: user.to_owned(), endpoint: endpoint.to_owned(), token: token.to_owned() };
+        if let Ok(body) = serde_json::to_string(&flow) {
+            let _ = c.set_ex::<_, _, ()>(self.link_flow_key(handle), body, PENDING_TTL_SECS).await;
+        }
+    }
+
+    pub async fn link_flow(&self, handle: &str) -> Option<LinkFlow> {
+        let mut c = self.conn().await?;
+        let body: String = c.get(self.link_flow_key(handle)).await.ok()?;
+        serde_json::from_str(&body).ok()
+    }
+
+    pub async fn drop_link_flow(&self, handle: &str) {
+        if let Some(mut c) = self.conn().await {
+            let _ = c.del::<_, ()>(self.link_flow_key(handle)).await;
+        }
+    }
+}

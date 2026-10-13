@@ -1,0 +1,63 @@
+# CollabCraft, as a single container.
+#
+# Everything that differs between deployments is an environment variable, set
+# in a .env beside this file. Copy .env.example and fill it in. Nothing here
+# names a host, so this file is the same everywhere.
+#
+#   docker compose up -d
+#
+# The browser builds are optional. Leave COLLABCRAFT_WEB_ROOT unset and the
+# service runs as an API and relay only, which is what you want if something
+# else already serves the WebAssembly.
+services:
+  collabcraft:
+    image: ${COLLABCRAFT_IMAGE:-ghcr.io/wdunn001/collabcraft:latest}
+    container_name: collabcraft
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      COLLABCRAFT_BIND: 0.0.0.0:9444
+      # Where a client is told to take its relay token. The public address,
+      # not the bind address: a client outside this host has to reach it.
+      COLLABCRAFT_PUBLIC_RELAY: ${COLLABCRAFT_PUBLIC_URL}
+      COLLABCRAFT_WEB_ROOT: ${COLLABCRAFT_WEB_ROOT:-/srv}
+      RUST_LOG: ${COLLABCRAFT_LOG:-collabcraft_relay=info,tower_http=warn}
+      # Only needed where the identity provider or the cloud provider is behind
+      # a certificate authority the base image does not ship. See README.
+      SSL_CERT_FILE: ${COLLABCRAFT_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
+    ports:
+      - "${COLLABCRAFT_LISTEN:-127.0.0.1:9444}:9444"
+    volumes:
+      # The browser builds, read-only. A static host has no reason to write.
+      - ${COLLABCRAFT_WEB_DIR:-./web}:/srv:ro
+    healthcheck:
+      # /healthz answers only once the bus is writable, so this fails when the
+      # service is up but cannot order an edit.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9444/healthz"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+  # Any Redis-compatible server will do. Point COLLABCRAFT_VALKEY_URL at one
+  # you already run and delete this service.
+  valkey:
+    image: ${COLLABCRAFT_VALKEY_IMAGE:-valkey/valkey:8-alpine}
+    container_name: collabcraft-valkey
+    restart: unless-stopped
+    # noeviction, because the sequence counters are not a cache. Losing one
+    # silently reorders every edit in that document.
+    command: ["valkey-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  valkey-data:

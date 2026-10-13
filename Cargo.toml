@@ -1,0 +1,51 @@
+[package]
+name = "collabcraft-relay"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "AGPL-3.0-or-later"
+description = "The CollabCraft relay: verifies Nextcloud-issued tokens, orders document edits and arbitrates scope locks"
+repository = "https://github.com/wdunn001/collabcraft"
+
+[[bin]]
+name = "collabcraft-relay"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[dependencies]
+axum = "0.8"
+craft-cloud = { path = "../craft-libs/crates/cloud" }
+craft-nextcloud = { path = "../craft-libs/crates/nextcloud" }
+# The identity provider and the cloud provider are both reached over HTTP. The
+# blocking client is for the provider contracts, which are synchronous and run
+# on a blocking thread.
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+# Static hosting for the browser builds, so one service answers everything.
+# ServiceExt::oneshot, to hand a request to the static service after the
+# permission check has passed.
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
+# Session ids and CSRF state come from the operating system, never a seeded PRNG.
+getrandom = "0.3"
+base64 = "0.23"
+hmac = "0.13"
+# The bus. Valkey speaks the Redis protocol, so this client works unchanged.
+redis = { version = "1", features = ["tokio-comp", "script"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+# extensions and state are opt-in in 0.18. Without them SocketRef has no
+# `.extensions` field and `extract::State` does not exist.
+socketioxide = { version = "0.18", features = ["extensions", "state", "tracing"] }
+# Room fanout across relay instances, over the same Valkey. No new queue.
+socketioxide-redis = "0.4"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
