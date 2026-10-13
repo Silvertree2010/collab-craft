@@ -12,6 +12,9 @@
 //! | `COLLABCRAFT_SECRET` | required | shared with the Nextcloud app |
 //! | `COLLABCRAFT_VALKEY_URL` | `redis://valkey:6379/6` | the bus |
 //! | `COLLABCRAFT_BIND` | `0.0.0.0:9444` | listen address |
+//! | `COLLABCRAFT_KEYED_LINKS` | on | `off` forbids links for recipients with no account |
+//! | `COLLABCRAFT_KEYED_LINK_TTL_HOURS` | 168 | how long one of those links lasts |
+//! | `COLLABCRAFT_KEYED_LINK_USES` | 1 | how often one may be opened |
 //!
 //! The Valkey URL uses the estate's DNS name rather than an address, so the
 //! relay follows the instance if it moves. Database index 6 is free: the stack
@@ -21,6 +24,8 @@
 mod api;
 mod auth;
 mod bus;
+mod keyed;
+mod recipient;
 mod room;
 mod session;
 mod state;
@@ -143,10 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The API half. It signs the tokens the relay above verifies, which is why
     // both halves hold the same secret and neither has to ask the other
     // anything at runtime.
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .unwrap_or_default();
+    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().unwrap_or_default();
     let oidc = session::Oidc::from_env(&http).await;
     if oidc.is_none() {
         tracing::warn!("no identity provider configured: every API route will refuse");
@@ -171,20 +173,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Precompressed on disk, sent with the Content-Encoding header.
         // Brotli at a high level costs minutes per wasm bundle, which is
         // unaffordable per request and free once at deploy.
-        web: tower_http::services::ServeDir::new(&web_root)
-            .precompressed_br()
-            .precompressed_gzip(),
+        web: tower_http::services::ServeDir::new(&web_root).precompressed_br().precompressed_gzip(),
         hosted,
         secret: secret_bytes,
         relay_url: std::env::var("COLLABCRAFT_PUBLIC_RELAY").unwrap_or_else(|_| format!("http://{bind}")),
         provider_base: std::env::var("COLLABCRAFT_PROVIDER_URL").unwrap_or_default(),
         permissions: state::Permissions::from_env(),
+        keyed: keyed::Policy::from_env(),
         store,
         oidc,
         http,
     });
     if app_state.provider_base.is_empty() {
         tracing::warn!("COLLABCRAFT_PROVIDER_URL is not set: no account can be linked");
+    }
+    if app_state.keyed.enabled() {
+        tracing::info!(ttl_secs = app_state.keyed.ttl_secs, uses = app_state.keyed.max_uses, "keyed links are enabled");
+    } else {
+        tracing::info!("keyed links are off: a share to an address with no account will mint nothing");
     }
 
     let api = axum::Router::new()
@@ -194,10 +200,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/files/content", axum::routing::get(api::read).put(api::write))
         .route("/files/new", axum::routing::post(api::create))
         .route("/contacts", axum::routing::get(api::contacts))
+        .route("/conversation", axum::routing::get(api::conversation))
         .route("/shares", axum::routing::get(api::shares).post(api::share))
         .route("/shares/{id}", axum::routing::delete(api::unshare))
         .route("/token", axum::routing::get(api::token))
-        .route("/apps", axum::routing::get(api::apps));
+        .route("/apps", axum::routing::get(api::apps))
+        // The recipient of a keyed link. Separate routes rather than the ones
+        // above, because those act as the signed-in user against the provider
+        // and a recipient is not one.
+        .route("/invite/token", axum::routing::get(recipient::token))
+        .route("/invite/content", axum::routing::get(recipient::read).put(recipient::write));
 
     let auth_routes = axum::Router::new()
         .route("/login", axum::routing::get(auth::login))
@@ -216,6 +228,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/healthz", axum::routing::get(|| async { "ok" }))
         .nest("/api/v1", api)
         .nest("/auth", auth_routes)
+        // Where a keyed link lands. A real route, so it wins over the static
+        // fallback below.
+        .route("/invite/{key}", axum::routing::get(recipient::land))
         .fallback(api::web)
         .with_state(app_state);
 

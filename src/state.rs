@@ -42,7 +42,15 @@ impl Permissions {
     }
 
     /// Every app this session may open, deduplicated and sorted.
+    ///
+    /// A recipient holding a keyed link gets the one app that opens the one
+    /// document they were sent, and nothing else. Deciding that here rather
+    /// than at each route is what makes it true everywhere at once: every
+    /// entitlement question in the service comes through this method.
     pub fn apps_for_session(&self, session: &Session) -> Vec<String> {
+        if let Some(guest) = &session.guest {
+            return vec![guest.app.clone()];
+        }
         let mut out = self.default.clone();
         for group in &session.groups {
             if let Some(extra) = self.by_group.get(&group.to_ascii_lowercase()) {
@@ -61,6 +69,20 @@ impl Permissions {
 
 fn split(raw: &str) -> Vec<String> {
     raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect()
+}
+
+/// What this deployment can do, as against what the provider can do.
+///
+/// Reported for the same reason the provider's list is reported: a dialog
+/// hides what it cannot deliver rather than offering a button that fails. The
+/// provider's list answers "can this server share at all", and this one
+/// answers "will this service do the parts it does itself".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceCapability {
+    /// A share aimed at an address with no account produces a link carrying a
+    /// one-time key. Absent where an organisation forbids them.
+    KeyedLinks,
 }
 
 /// Everything the service needs at runtime.
@@ -86,6 +108,8 @@ pub struct App {
     /// Directory names under the web root, which are the apps this deployment
     /// actually hosts. Read once at startup rather than from disk per request.
     pub hosted: Vec<String>,
+    /// Whether this deployment mints keyed links, and on what terms.
+    pub keyed: crate::keyed::Policy,
 }
 
 impl App {
@@ -94,12 +118,38 @@ impl App {
         !name.is_empty() && self.hosted.iter().any(|a| a == name)
     }
 
+    /// What this deployment itself offers, beyond what the provider offers.
+    pub fn service_capabilities(&self) -> Vec<ServiceCapability> {
+        let mut out = Vec::new();
+        if self.keyed.enabled() {
+            out.push(ServiceCapability::KeyedLinks);
+        }
+        out
+    }
+
     /// A provider acting as this user, or `None` when no account is linked.
     ///
     /// The credential never leaves this process. A client gets answers, never
     /// the means to produce them itself.
+    ///
+    /// A recipient holding a keyed link is refused outright rather than looked
+    /// up. They have no account at the provider, so a lookup would find
+    /// nothing anyway, and saying so here means every provider-backed route
+    /// closes to them at once rather than each one having to remember.
     pub async fn provider_for(&self, session: &Session) -> Option<Arc<dyn Provider + Send + Sync>> {
-        let link = self.store.provider_link(&session.user).await?;
+        if session.is_guest() {
+            return None;
+        }
+        self.provider_for_owner(&session.user).await
+    }
+
+    /// A provider acting as one named account holder.
+    ///
+    /// Used on a recipient's behalf. Reading a shared document as the sharer
+    /// is what lets somebody with no account open it, and it is why the
+    /// recipient never holds a credential of any kind.
+    pub async fn provider_for_owner(&self, user: &str) -> Option<Arc<dyn Provider + Send + Sync>> {
+        let link = self.store.provider_link(user).await?;
         let account = Account::new(self.provider_base.clone(), link.user, link.password);
         Some(Arc::new(Nextcloud::new(account, ReqwestHttp::default())))
     }
@@ -113,19 +163,8 @@ impl App {
         // A peer id per token, not per user. Two windows open on the same
         // document are two peers, and the roster has to tell them apart.
         let peer = crate::session::random_id();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        crate::token::sign_at(
-            &self.secret,
-            room,
-            &session.user,
-            &session.display,
-            matches!(permission, Permission::Edit),
-            &peer,
-            now,
-        )
-        .map_err(|e| e.to_string())
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        crate::token::sign_at(&self.secret, room, &session.user, &session.display, matches!(permission, Permission::Edit), &peer, now)
+            .map_err(|e| e.to_string())
     }
 }

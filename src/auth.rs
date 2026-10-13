@@ -108,13 +108,7 @@ pub async fn device_start(State(app): State<Arc<App>>) -> Response {
     app.store.put_pending(&state, &format!("device:{device_code}")).await;
     app.store.put_device(&device_code).await;
 
-    Json(DeviceStart {
-        device_code,
-        verify_url: oidc.authorize_url(&state),
-        expires_in: 600,
-        interval: 2,
-    })
-    .into_response()
+    Json(DeviceStart { device_code, verify_url: oidc.authorize_url(&state), expires_in: 600, interval: 2 }).into_response()
 }
 
 #[derive(Deserialize)]
@@ -140,10 +134,7 @@ pub async fn device_poll(State(app): State<Arc<App>>, Json(q): Json<DevicePoll>)
             Json(crate::api::ApiError { code: "authorization_pending", detail: "waiting for the browser".to_owned() }),
         )
             .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(crate::api::ApiError { code: "expired", detail: "that sign-in expired; start another".to_owned() }),
-        )
+        None => (StatusCode::NOT_FOUND, Json(crate::api::ApiError { code: "expired", detail: "that sign-in expired; start another".to_owned() }))
             .into_response(),
     }
 }
@@ -177,16 +168,8 @@ pub async fn link_start(State(app): State<Arc<App>>, session: Session) -> Respon
             app.store.put_link_flow(&handle, &session.user, &f.endpoint, &f.token).await;
             Json(LinkStart { login_url: f.login_url, handle }).into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::BAD_GATEWAY,
-            Json(crate::api::ApiError { code: "provider_unreachable", detail: e.to_string() }),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::api::ApiError { code: "panic", detail: e.to_string() }),
-        )
-            .into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, Json(crate::api::ApiError { code: "provider_unreachable", detail: e.to_string() })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(crate::api::ApiError { code: "panic", detail: e.to_string() })).into_response(),
     }
 }
 
@@ -198,29 +181,19 @@ pub struct LinkPoll {
 /// Finish linking, once the user has authenticated at the provider.
 pub async fn link_poll(State(app): State<Arc<App>>, session: Session, Json(q): Json<LinkPoll>) -> Response {
     let Some(flow) = app.store.link_flow(&q.handle).await else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(crate::api::ApiError { code: "expired", detail: "that link request expired".to_owned() }),
-        )
+        return (StatusCode::NOT_FOUND, Json(crate::api::ApiError { code: "expired", detail: "that link request expired".to_owned() }))
             .into_response();
     };
     if flow.user != session.user {
         // The handle belongs to somebody else. Refused rather than explained,
         // because the only way to hold one is to have been given it.
-        return (
-            StatusCode::FORBIDDEN,
-            Json(crate::api::ApiError { code: "forbidden", detail: "that link request is not yours".to_owned() }),
-        )
+        return (StatusCode::FORBIDDEN, Json(crate::api::ApiError { code: "forbidden", detail: "that link request is not yours".to_owned() }))
             .into_response();
     }
 
     let polled = tokio::task::spawn_blocking(move || {
         let http = crate::transport::ReqwestHttp::default();
-        let f = craft_nextcloud::LoginFlow {
-            login_url: String::new(),
-            endpoint: flow.endpoint,
-            token: flow.token,
-        };
+        let f = craft_nextcloud::LoginFlow { login_url: String::new(), endpoint: flow.endpoint, token: flow.token };
         f.poll(&http)
     })
     .await;
@@ -244,16 +217,8 @@ pub async fn link_poll(State(app): State<Arc<App>>, session: Session, Json(q): J
             Json(crate::api::ApiError { code: "authorization_pending", detail: "waiting for the browser".to_owned() }),
         )
             .into_response(),
-        Ok(Err(e)) => (
-            StatusCode::BAD_GATEWAY,
-            Json(crate::api::ApiError { code: "provider_unreachable", detail: e.to_string() }),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::api::ApiError { code: "panic", detail: e.to_string() }),
-        )
-            .into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, Json(crate::api::ApiError { code: "provider_unreachable", detail: e.to_string() })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(crate::api::ApiError { code: "panic", detail: e.to_string() })).into_response(),
     }
 }
 
