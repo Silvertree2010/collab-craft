@@ -47,14 +47,7 @@ pub struct NoSession;
 
 impl IntoResponse for NoSession {
     fn into_response(self) -> Response {
-        (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(crate::api::ApiError {
-                code: "unauthenticated",
-                detail: "sign in first".to_owned(),
-            }),
-        )
-            .into_response()
+        (StatusCode::UNAUTHORIZED, axum::Json(crate::api::ApiError { code: "unauthenticated", detail: "sign in first".to_owned() })).into_response()
     }
 }
 
@@ -164,15 +157,8 @@ impl Oidc {
             ("client_id", self.client_id.as_str()),
             ("client_secret", self.client_secret.as_str()),
         ];
-        let token: serde_json::Value = http
-            .post(&self.discovery.token_endpoint)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
+        let token: serde_json::Value =
+            http.post(&self.discovery.token_endpoint).form(&form).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
         let access = token.get("access_token").and_then(|v| v.as_str()).ok_or("no access token")?;
 
         let info: serde_json::Value = http
@@ -186,12 +172,7 @@ impl Oidc {
             .map_err(|e| e.to_string())?;
 
         let user = info.get("sub").and_then(|v| v.as_str()).ok_or("no subject")?.to_owned();
-        let display = info
-            .get("name")
-            .or_else(|| info.get("preferred_username"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(&user)
-            .to_owned();
+        let display = info.get("name").or_else(|| info.get("preferred_username")).and_then(|v| v.as_str()).unwrap_or(&user).to_owned();
         let email = info.get("email").and_then(|v| v.as_str()).map(str::to_owned);
         let groups = info
             .get("groups")
@@ -239,10 +220,7 @@ pub fn random_id() -> String {
 impl OptionalFromRequestParts<Arc<App>> for Session {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        app: &Arc<App>,
-    ) -> Result<Option<Session>, std::convert::Infallible> {
+    async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> Result<Option<Session>, std::convert::Infallible> {
         if let Some(id) = bearer(parts).or_else(|| cookie(parts, COOKIE)) {
             return Ok(app.store.session(&id).await);
         }

@@ -73,11 +73,7 @@ where
         Ok(Err(e)) => fail(e),
         // The thread panicked. Reported rather than swallowed, because a
         // provider that panics is a defect somebody has to see.
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError { code: "panic", detail: e.to_string() }),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
     }
 }
 
@@ -89,10 +85,7 @@ where
 fn not_linked() -> Response {
     (
         StatusCode::PRECONDITION_REQUIRED,
-        Json(ApiError {
-            code: "provider_not_linked",
-            detail: "link a cloud account before opening or saving documents".to_owned(),
-        }),
+        Json(ApiError { code: "provider_not_linked", detail: "link a cloud account before opening or saving documents".to_owned() }),
     )
         .into_response()
 }
@@ -145,8 +138,7 @@ pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
         })
         .into_response(),
         Ok(Err(e)) => fail(e),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() }))
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
     }
 }
 
@@ -183,8 +175,7 @@ pub async fn read(State(app): State<Arc<App>>, session: Session, Query(q): Query
     match tokio::task::spawn_blocking(move || p.read(&q.id)).await {
         Ok(Ok(bytes)) => ([(axum::http::header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response(),
         Ok(Err(e)) => fail(e),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() }))
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
     }
 }
 
@@ -197,12 +188,7 @@ pub struct WriteQuery {
     pub if_match: Option<String>,
 }
 
-pub async fn write(
-    State(app): State<Arc<App>>,
-    session: Session,
-    Query(q): Query<WriteQuery>,
-    body: axum::body::Bytes,
-) -> Response {
+pub async fn write(State(app): State<Arc<App>>, session: Session, Query(q): Query<WriteQuery>, body: axum::body::Bytes) -> Response {
     let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
     run(move || p.write(&q.id, &body, q.if_match.as_deref())).await
 }
@@ -213,12 +199,7 @@ pub struct CreateQuery {
     pub name: String,
 }
 
-pub async fn create(
-    State(app): State<Arc<App>>,
-    session: Session,
-    Query(q): Query<CreateQuery>,
-    body: axum::body::Bytes,
-) -> Response {
+pub async fn create(State(app): State<Arc<App>>, session: Session, Query(q): Query<CreateQuery>, body: axum::body::Bytes) -> Response {
     let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
     run(move || p.create(&q.folder, &q.name, &body)).await
 }
@@ -327,8 +308,7 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, Json(req): Jso
 
     match outcome {
         Ok(o) => Json(o).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() }))
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
     }
 }
 
@@ -342,8 +322,7 @@ pub async fn unshare(State(app): State<Arc<App>>, session: Session, Path(share_i
     match tokio::task::spawn_blocking(move || p.unshare(&share_id)).await {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(e)) => fail(e),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() }))
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
     }
 }
 
@@ -375,16 +354,13 @@ pub async fn token(State(app): State<Arc<App>>, session: Session, Query(q): Quer
         Ok(Ok(e)) => e,
         Ok(Err(e)) => return fail(e),
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() }))
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response();
         }
     };
     let permission = if entry.writable { Permission::Edit } else { Permission::View };
     match app.mint_token(&session, &entry.room, permission) {
         Ok(token) => Json(TokenResponse { token, relay: app.relay_url.clone(), room: entry.room }).into_response(),
-        Err(detail) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "mint_failed", detail })).into_response()
-        }
+        Err(detail) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "mint_failed", detail })).into_response(),
     }
 }
 
@@ -399,11 +375,7 @@ pub async fn token(State(app): State<Arc<App>>, session: Session, Query(q): Quer
 ///
 /// Anything that is not an app directory is served unconditionally. Shared
 /// assets and the index have nothing to gate.
-pub async fn web(
-    State(app): State<Arc<App>>,
-    session: Option<Session>,
-    req: axum::extract::Request,
-) -> Response {
+pub async fn web(State(app): State<Arc<App>>, session: Option<Session>, req: axum::extract::Request) -> Response {
     let path = req.uri().path().trim_start_matches('/').to_owned();
     let first = path.split('/').next().unwrap_or_default().to_owned();
 
@@ -414,13 +386,7 @@ pub async fn web(
             return axum::response::Redirect::temporary("/auth/login").into_response();
         };
         if !app.permissions.may_open(&session, &first) {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ApiError {
-                    code: "app_not_permitted",
-                    detail: format!("you do not have access to {first}"),
-                }),
-            )
+            return (StatusCode::FORBIDDEN, Json(ApiError { code: "app_not_permitted", detail: format!("you do not have access to {first}") }))
                 .into_response();
         }
     }
@@ -433,11 +399,7 @@ pub async fn web(
             }
             response
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError { code: "static", detail: e.to_string() }),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "static", detail: e.to_string() })).into_response(),
     }
 }
 

@@ -113,19 +113,8 @@ impl App {
         // A peer id per token, not per user. Two windows open on the same
         // document are two peers, and the roster has to tell them apart.
         let peer = crate::session::random_id();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        crate::token::sign_at(
-            &self.secret,
-            room,
-            &session.user,
-            &session.display,
-            matches!(permission, Permission::Edit),
-            &peer,
-            now,
-        )
-        .map_err(|e| e.to_string())
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        crate::token::sign_at(&self.secret, room, &session.user, &session.display, matches!(permission, Permission::Edit), &peer, now)
+            .map_err(|e| e.to_string())
     }
 }

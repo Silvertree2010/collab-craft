@@ -91,24 +91,14 @@ impl Claims {
 /// character is a bug upstream, and quietly rewriting it would put two peers
 /// in rooms they both believe are the same one.
 fn room_is_sane(room: &str) -> bool {
-    !room.is_empty()
-        && room.len() <= 256
-        && room.chars().all(|c| !c.is_whitespace() && !c.is_control())
+    !room.is_empty() && room.len() <= 256 && room.chars().all(|c| !c.is_whitespace() && !c.is_control())
 }
 
 /// Sign a token for one room.
 ///
 /// `now` is passed in rather than read from the clock, so this is testable and
 /// so a caller that already knows the time does not read it twice.
-pub fn sign_at(
-    secret: &[u8],
-    room: &str,
-    user: &str,
-    display: &str,
-    may_edit: bool,
-    peer: &str,
-    now: i64,
-) -> Result<String, TokenError> {
+pub fn sign_at(secret: &[u8], room: &str, user: &str, display: &str, may_edit: bool, peer: &str, now: i64) -> Result<String, TokenError> {
     if !room_is_sane(room) {
         return Err(TokenError::Room(room.to_owned()));
     }

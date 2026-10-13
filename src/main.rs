@@ -143,10 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The API half. It signs the tokens the relay above verifies, which is why
     // both halves hold the same secret and neither has to ask the other
     // anything at runtime.
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .unwrap_or_default();
+    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().unwrap_or_default();
     let oidc = session::Oidc::from_env(&http).await;
     if oidc.is_none() {
         tracing::warn!("no identity provider configured: every API route will refuse");
@@ -171,9 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Precompressed on disk, sent with the Content-Encoding header.
         // Brotli at a high level costs minutes per wasm bundle, which is
         // unaffordable per request and free once at deploy.
-        web: tower_http::services::ServeDir::new(&web_root)
-            .precompressed_br()
-            .precompressed_gzip(),
+        web: tower_http::services::ServeDir::new(&web_root).precompressed_br().precompressed_gzip(),
         hosted,
         secret: secret_bytes,
         relay_url: std::env::var("COLLABCRAFT_PUBLIC_RELAY").unwrap_or_else(|_| format!("http://{bind}")),
