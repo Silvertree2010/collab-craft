@@ -1,11 +1,17 @@
 # The CollabCraft service: the API, the sign-in, the socket relay and the static
 # hosting for the browser builds, in one binary.
 #
-# Build context is the directory holding both trees, because the service takes
-# path dependencies on craft-libs. The wire protocol and the provider contracts
-# live there so every Craft app speaks the same ones.
+# Build context is this repository root:
 #
-#   docker build -f collabcraft/Dockerfile -t collabcraft:latest .
+#   docker build -t collabcraft:latest .
+#
+# The contracts in craft-libs arrive as a pinned git dependency. No sibling
+# checkout is required. An earlier layout took a path dependency on a sibling
+# tree and this file copied both.
+#
+# git is installed in the build stage because craft-cloud and craft-ui are git
+# dependencies. The rust:1-slim image carries no git binary. Cargo then reports
+# the pinned revision as not found. That message names the wrong cause.
 #
 # pkg-config and libssl-dev are needed because rust_socketio depends on
 # native-tls, which builds openssl-sys. That dependency is also why the client
@@ -16,15 +22,14 @@ FROM rust:1-slim AS build
 WORKDIR /src
 
 RUN apt-get update -qq \
- && apt-get install -y -qq --no-install-recommends pkg-config libssl-dev \
+ && apt-get install -y -qq --no-install-recommends git ca-certificates pkg-config libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# Both trees, because the manifests reference each other by path and cargo
-# resolves them before it reads a single source file.
-COPY craft-libs ./craft-libs
-COPY collabcraft ./collabcraft
+COPY . .
 
-WORKDIR /src/collabcraft
+# No Cargo.lock is committed, so --locked fails on a first build. The fallback
+# resolves and then builds. The first attempt stays for the case where a lock
+# file is present and should be honoured exactly.
 RUN cargo build --release --locked 2>/dev/null || cargo build --release
 
 FROM debian:13-slim
@@ -36,7 +41,7 @@ RUN apt-get update -qq \
 
 # Unprivileged. The service needs no ports below 1024 and writes nothing.
 RUN useradd --system --no-create-home --uid 10001 collabcraft
-COPY --from=build /src/collabcraft/target/release/collabcraft-relay /usr/local/bin/collabcraft
+COPY --from=build /src/target/release/collabcraft-relay /usr/local/bin/collabcraft
 USER collabcraft
 
 # Overridden by compose. Stated so the image runs on its own.
