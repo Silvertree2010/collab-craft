@@ -145,6 +145,29 @@ Note the build constraint. The workstation has cargo and no MSVC linker. A
 Windows build therefore needs either the C++ build tools installed or a
 cross-compile. Linux builds go in a container.
 
+## 6. The web face
+
+Built. The service renders its own pages out of the one binary.
+
+| Page | What it answers |
+|---|---|
+| `/` | the applications this signed-in user may open |
+| `/account` | who they are, whether storage is linked, what they may open |
+| `/settings/provider` | which cloud this deployment uses |
+
+No framework, no build step, no external asset. The launcher takes over from a
+hand-written `index.html` in the web root. That file published an internal
+path to anybody who read it.
+
+The cloud provider is configurable from a browser now. The environment stays
+the default. A value saved on the page overrides it. Membership of a group
+named by `COLLABCRAFT_ADMIN_GROUPS` is the whole of the permission to change
+it. Saving tests the address first.
+
+What is still owed here is the share dialog's own web surface. A browser build
+carrying `craft-ui::share` is the piece that makes sharing reachable without a
+desktop application.
+
 ## Not forgotten
 
 The relay's healthcheck was wrong and is fixed: it used `/dev/tcp`, a bash

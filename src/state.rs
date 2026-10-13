@@ -29,16 +29,25 @@ impl Permissions {
     /// Nothing is compiled in, so a deployment decides its own catalogue and
     /// its own entitlements without a rebuild.
     pub fn from_env() -> Permissions {
-        let default = split(&std::env::var("COLLABCRAFT_APPS_DEFAULT").unwrap_or_default());
-        let mut by_group = BTreeMap::new();
+        let default = std::env::var("COLLABCRAFT_APPS_DEFAULT").unwrap_or_default();
+        let mut groups: Vec<(String, String)> = Vec::new();
         for (key, value) in std::env::vars() {
             if let Some(group) = key.strip_prefix("COLLABCRAFT_APPS_")
                 && group != "DEFAULT"
             {
-                by_group.insert(group.to_ascii_lowercase(), split(&value));
+                groups.push((group.to_owned(), value));
             }
         }
-        Permissions { default, by_group }
+        let named: Vec<(&str, &str)> = groups.iter().map(|(group, apps)| (group.as_str(), apps.as_str())).collect();
+        Permissions::decide(&default, &named)
+    }
+
+    /// The same decision over values.
+    ///
+    /// Separated so entitlement is testable. Reading the environment inside a
+    /// test would race every other test in the binary.
+    pub fn decide(default: &str, by_group: &[(&str, &str)]) -> Permissions {
+        Permissions { default: split(default), by_group: by_group.iter().map(|(group, apps)| (group.to_ascii_lowercase(), split(apps))).collect() }
     }
 
     /// Every app this session may open, deduplicated and sorted.
@@ -91,9 +100,11 @@ pub struct App {
     pub secret: Vec<u8>,
     /// Handed to clients so the relay can move without reissuing apps.
     pub relay_url: String,
-    /// Where the provider lives. One per deployment for now; the shape allows
-    /// more than one later, because nothing above here names a provider.
-    pub provider_base: String,
+    /// Which provider this deployment uses, and who may change that.
+    ///
+    /// One per deployment for now. The shape allows more than one later,
+    /// because nothing above here names a provider.
+    pub settings: crate::settings::Settings,
     pub permissions: Permissions,
     /// Session and link storage, on the Valkey the rest of the estate uses.
     pub store: crate::store::Store,
@@ -116,6 +127,26 @@ impl App {
     /// Whether a path segment names an app this deployment hosts.
     pub fn is_app(&self, name: &str) -> bool {
         !name.is_empty() && self.hosted.iter().any(|a| a == name)
+    }
+
+    /// Every app this session may actually open here.
+    ///
+    /// Entitlement crossed with what this deployment hosts. Both halves are
+    /// needed: an entitlement to an app nobody deployed opens nothing, and a
+    /// hosted app nobody is entitled to is a 403. The launcher draws from
+    /// this, so a card that cannot work never appears.
+    pub fn launchable(&self, session: &Session) -> Vec<String> {
+        self.permissions.apps_for_session(session).into_iter().filter(|name| self.is_app(name)).collect()
+    }
+
+    /// Which provider this deployment uses, and where that came from.
+    ///
+    /// A value stored on the bus overrides the environment. Read per call
+    /// rather than cached, because more than one instance may serve one
+    /// deployment and a cache in each would disagree with the others after a
+    /// change. A session is already read from the same bus on every request.
+    pub async fn provider_config(&self) -> Option<(crate::settings::ProviderConfig, crate::settings::Source)> {
+        self.settings.resolve(self.store.provider_config().await)
     }
 
     /// What this deployment itself offers, beyond what the provider offers.
@@ -149,8 +180,13 @@ impl App {
     /// is what lets somebody with no account open it, and it is why the
     /// recipient never holds a credential of any kind.
     pub async fn provider_for_owner(&self, user: &str) -> Option<Arc<dyn Provider + Send + Sync>> {
+        let (config, _) = self.provider_config().await?;
+        if config.kind != "nextcloud" {
+            tracing::error!(kind = %config.kind, "this service does not implement that kind of provider");
+            return None;
+        }
         let link = self.store.provider_link(user).await?;
-        let account = Account::new(self.provider_base.clone(), link.user, link.password);
+        let account = Account::new(config.base, link.user, link.password);
         Some(Arc::new(Nextcloud::new(account, ReqwestHttp::default())))
     }
 

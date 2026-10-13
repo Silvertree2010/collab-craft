@@ -59,6 +59,55 @@ Replacing the system bundle with only your CA breaks every public call.
 cat /etc/ssl/certs/ca-certificates.crt your-root-ca.crt > ca-bundle.pem
 ```
 
+## The web face
+
+The service answers a browser as well as an application. The pages are
+rendered by the service itself. No framework, no build step, no external
+asset. One request draws a whole page.
+
+`/` lists the applications the signed-in user may open. The set is their
+entitlement crossed with what this deployment hosts. An entitlement to an
+application nobody deployed draws nothing. A card over a 404 is worse than no
+card. An anonymous visitor is offered a sign-in.
+
+`/account` says who somebody is and whether their storage is linked. It lists
+the applications they may open. It carries the actions for linking storage,
+unlinking it and signing out. The desktop application's Account settings link
+already points here.
+
+`/settings/provider` is where a deployment says which cloud it uses. See
+*Configuring the provider* below.
+
+Every page draws what it draws from entitlement and capability. A control that
+cannot work does not appear. A deployment with no identity provider offers no
+sign-in button. A deployment with no cloud provider offers no Link storage
+button. Somebody outside the configuring group sees no link to the setup page.
+
+Light and dark follow the browser's own setting through
+`prefers-color-scheme`. There is nothing to choose and nothing stored.
+
+## Configuring the provider
+
+`COLLABCRAFT_PROVIDER_URL` is the default. A value saved on
+`/settings/provider` overrides it. That value lives on the bus with no expiry.
+A deployment that saves nothing keeps working exactly as it did.
+
+Saving tests first. The test asks the provider to begin its own desktop
+sign-in. That needs no credential and no account. A server that answers is
+reachable, speaks the protocol and is willing to issue a credential. An
+address that does not answer is never saved. A stored address nobody proved
+fails for every user at once.
+
+`COLLABCRAFT_ADMIN_GROUPS` names the groups whose members may change it. The
+identity provider reports membership. Somebody added to a group there has the
+whole of the permission. A deployment that names no group has nobody who may
+change it. The page then refuses everybody.
+
+The page names the groups that may change it. Somebody refused therefore knows
+who to ask. The provider's address appears on that page and on no other, since
+that group is the one entitled to change it. One exception stands. A user
+linking storage authenticates at their own provider and has to be sent there.
+
 ## Providers
 
 `craft-cloud` defines what a provider offers: files, sharing, contacts,

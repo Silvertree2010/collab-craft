@@ -22,6 +22,8 @@ use serde::Serialize;
 
 use crate::api::ApiError;
 use crate::keyed::{self, Key, Link, Refusal};
+// One escaper for every page this service renders. Two would be one too many.
+use crate::pages::escape;
 use crate::session::{GUEST_COOKIE, Guest, Session, random_id};
 use crate::state::App;
 
@@ -289,22 +291,6 @@ fn page(message: &str) -> String {
          <body><h1>This link does not work</h1><p>{}</p></body></html>\n",
         escape(message)
     )
-}
-
-/// Escape the five characters that change the meaning of markup.
-fn escape(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for c in raw.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 fn now_unix() -> i64 {

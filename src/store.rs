@@ -211,6 +211,40 @@ impl Store {
     }
 }
 
+/// The cloud provider this deployment configured for itself.
+///
+/// The one record here with no expiry, because it is configuration and not
+/// state. The bus runs with `appendonly` and `noeviction`, so what is written
+/// here survives a restart of either side.
+///
+/// No credential is involved. An address says where a provider is. The account
+/// that acts against it is linked per user, and that record is the one holding
+/// a credential.
+impl Store {
+    fn provider_config_key(&self) -> String {
+        format!("{}:config:provider", self.prefix)
+    }
+
+    pub async fn provider_config(&self) -> Option<crate::settings::ProviderConfig> {
+        let mut c = self.conn().await?;
+        let body: String = c.get(self.provider_config_key()).await.ok()?;
+        serde_json::from_str(&body).ok()
+    }
+
+    pub async fn put_provider_config(&self, config: &crate::settings::ProviderConfig) -> bool {
+        let Some(mut c) = self.conn().await else { return false };
+        let Ok(body) = serde_json::to_string(config) else { return false };
+        c.set::<_, _, ()>(self.provider_config_key(), body).await.is_ok()
+    }
+
+    /// Forget the stored provider, which puts the deployment back on whatever
+    /// its environment names.
+    pub async fn drop_provider_config(&self) -> bool {
+        let Some(mut c) = self.conn().await else { return false };
+        c.del::<_, ()>(self.provider_config_key()).await.is_ok()
+    }
+}
+
 /// Keyed links, for a recipient with no account.
 ///
 /// Three keys per link, each with the same expiry. The record is written once
