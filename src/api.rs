@@ -177,6 +177,20 @@ pub struct IdQuery {
     pub id: String,
 }
 
+/// Where to go to work together on a document.
+///
+/// Nextcloud calls it Talk. Another provider calls it something else, and the
+/// answer carries that name so a control can say which. A provider without the
+/// feature answers that it is unsupported, and the client then draws nothing.
+pub async fn conversation(State(app): State<Arc<App>>, session: Session, Query(q): Query<IdQuery>) -> Response {
+    let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
+    // The last segment, which is what a person would call the document. A
+    // provider that names the room uses it. One that keys on a file id ignores
+    // it.
+    let title = q.id.rsplit('/').next().unwrap_or_default().to_owned();
+    run(move || p.conversation(&q.id, &title)).await
+}
+
 pub async fn read(State(app): State<Arc<App>>, session: Session, Query(q): Query<IdQuery>) -> Response {
     let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
     match tokio::task::spawn_blocking(move || p.read(&q.id)).await {
