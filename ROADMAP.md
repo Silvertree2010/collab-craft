@@ -9,13 +9,13 @@ Deployed and reachable. The co-edit path does **not** work.
 
 | Piece | State |
 |---|---|
-| Relay on `.88` | running, `/healthz` 200, bus ready |
+| Relay | running, `/healthz` 200, bus ready |
 | `collabcraft` Nextcloud app | enabled on 30.0.17 |
 | Shared secret | in the deployment's secret store, pushed to both consumers |
 | Token minting | works, verified against a real file id |
 | Two peers co-editing | **fails**, six consecutive runs |
 
-Run `smoke-test.sh` on `.229` for a PASS or FAIL verdict in one command.
+Run `smoke-test.sh` for a PASS or FAIL verdict in one command.
 
 ## 0. BLOCKER: on_connect fires twice per client
 
@@ -143,7 +143,7 @@ on the local caret.
 
 Note the build constraint. The workstation has cargo and no MSVC linker. A
 Windows build therefore needs either the C++ build tools installed or a
-cross-compile. Linux builds go in a container on `.57`.
+cross-compile. Linux builds go in a container.
 
 ## Not forgotten
 
