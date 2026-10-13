@@ -20,6 +20,13 @@ services:
       # Where a client is told to take its relay token. The public address,
       # not the bind address: a client outside this host has to reach it.
       COLLABCRAFT_PUBLIC_RELAY: ${COLLABCRAFT_PUBLIC_URL}
+      # Where a keyed link points. The same public address, named separately
+      # because one is the relay a client dials and the other is a link a
+      # recipient clicks in their mail.
+      COLLABCRAFT_PUBLIC_URL: ${COLLABCRAFT_PUBLIC_URL}
+      COLLABCRAFT_KEYED_LINKS: ${COLLABCRAFT_KEYED_LINKS:-on}
+      COLLABCRAFT_KEYED_LINK_TTL_HOURS: ${COLLABCRAFT_KEYED_LINK_TTL_HOURS:-168}
+      COLLABCRAFT_KEYED_LINK_USES: ${COLLABCRAFT_KEYED_LINK_USES:-1}
       COLLABCRAFT_WEB_ROOT: ${COLLABCRAFT_WEB_ROOT:-/srv}
       RUST_LOG: ${COLLABCRAFT_LOG:-collabcraft_relay=info,tower_http=warn}
       # Only needed where the identity provider or the cloud provider is behind

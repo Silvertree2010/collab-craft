@@ -47,7 +47,7 @@ pub struct ApiError {
 /// The distinctions matter to a UI. `unauthenticated` offers a sign-in,
 /// `forbidden` must not, `conflict` offers to reload, `unsupported` hides the
 /// feature rather than explaining it.
-fn fail(e: craft_cloud::Error) -> Response {
+pub(crate) fn fail(e: craft_cloud::Error) -> Response {
     use craft_cloud::Error as E;
     let (status, code) = match &e {
         E::Unreachable(_) => (StatusCode::BAD_GATEWAY, "unreachable"),
@@ -104,12 +104,17 @@ pub struct Me {
     /// What the provider can actually do, so a UI hides what it cannot
     /// deliver rather than failing on use.
     pub capabilities: Vec<craft_cloud::Capability>,
+    /// What this deployment does itself, on the same terms. An organisation
+    /// that forbids keyed links reports none, and the share dialog then offers
+    /// no button rather than one that fails.
+    pub service: Vec<crate::state::ServiceCapability>,
     /// Until an account is linked, Open and Save have nowhere to go.
     pub provider_linked: bool,
 }
 
 pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
     let apps = app.permissions.apps_for_session(&session);
+    let service = app.service_capabilities();
     let Some(provider) = app.provider_for(&session).await else {
         return Json(Me {
             id: session.user,
@@ -118,6 +123,7 @@ pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
             avatar: None,
             apps,
             capabilities: Vec::new(),
+            service,
             provider_linked: false,
         })
         .into_response();
@@ -134,6 +140,7 @@ pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
             avatar: id.avatar,
             apps,
             capabilities,
+            service,
             provider_linked: true,
         })
         .into_response(),
@@ -252,6 +259,15 @@ pub struct ShareRequest {
     /// `YYYY-MM-DD`, after which the share stops working.
     #[serde(default)]
     pub expires: Option<String>,
+    /// Which Craft app opens this document, for a recipient with no account.
+    ///
+    /// Named by the app doing the sharing, because that app is already the
+    /// right answer. Checked here against what this deployment hosts and what
+    /// the sharer may open, so nobody can send a recipient into a build they
+    /// could not open themselves. It is then pinned to the key and never read
+    /// from the request that redeems it.
+    #[serde(default)]
+    pub app: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -259,6 +275,12 @@ pub struct ShareOutcome {
     pub shared: Vec<craft_cloud::Share>,
     /// One entry per target that failed, so the dialog can say which.
     pub failed: Vec<ShareFailure>,
+    /// One entry per recipient who has no account and got a keyed link.
+    ///
+    /// Empty where this deployment forbids them, where nothing was shared by
+    /// address, or where every address turned out to hold an account after
+    /// all.
+    pub keyed: Vec<KeyedOutcome>,
 }
 
 #[derive(Serialize)]
@@ -268,48 +290,259 @@ pub struct ShareFailure {
     pub detail: String,
 }
 
+/// A keyed link that was minted, and what became of it.
+#[derive(Serialize)]
+pub struct KeyedOutcome {
+    pub target: ShareTarget,
+    /// The link to hand out. A lookup handle and a key, carrying no
+    /// permission: the grant stays in this service and is re-read on every
+    /// request.
+    pub url: String,
+    /// Unix, when the key stops working.
+    pub expires: i64,
+    /// How many times it may be opened.
+    pub uses: u32,
+    /// Whether the provider mailed it.
+    pub delivered: bool,
+    /// Why it was not mailed. `mail_unsupported` means this provider sends no
+    /// mail of its own, so the sharer has to pass the link on themselves,
+    /// which is why the link is returned here rather than only sent.
+    pub delivery: &'static str,
+}
+
 /// Share with several people at once.
 ///
 /// Partial success is reported rather than hidden. Sharing with five people
 /// where one address is wrong should share with four and name the one that
 /// failed, not fail the lot and not claim all five worked.
+///
+/// A target that turns out to be an address nobody holds an account for also
+/// gets a keyed link, because such a person cannot be told to sign in. The
+/// provider still records the share, so it stays the authority on who may open
+/// what and withdrawing it withdraws the key.
 pub async fn share(State(app): State<Arc<App>>, session: Session, Json(req): Json<ShareRequest>) -> Response {
     let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
     if !p.supports(craft_cloud::Capability::Sharing) {
         return fail(craft_cloud::Error::Unsupported("sharing"));
     }
 
-    let outcome = tokio::task::spawn_blocking(move || {
-        let mut shared = Vec::new();
-        let mut failed = Vec::new();
-        for target in &req.targets {
-            let options = craft_cloud::ShareOptions {
-                note: req.note.clone(),
-                notify: req.notify,
-                password: req.password.clone(),
-                expires: req.expires.clone(),
-            };
-            match p.share(&req.id, target, req.permission, &options) {
-                Ok(s) => shared.push(s),
-                Err(e) => {
-                    let code = match &e {
-                        craft_cloud::Error::NotFound { .. } => "not_found",
-                        craft_cloud::Error::Forbidden(_) => "forbidden",
-                        craft_cloud::Error::Unreachable(_) => "unreachable",
-                        _ => "failed",
-                    };
-                    failed.push(ShareFailure { target: target.clone(), code, detail: e.to_string() });
-                }
-            }
-        }
-        ShareOutcome { shared, failed }
+    // Where a recipient with no account would land. Settled before anything is
+    // shared, because a key with nowhere to go is worse than no key, and a
+    // sharer told now can do something about it.
+    let landing = landing_app(&app, &session, req.app.as_deref());
+    let mint = app.keyed.enabled() && landing.is_some();
+
+    let req = Arc::new(req);
+    let placing = tokio::task::spawn_blocking({
+        let p = p.clone();
+        let req = req.clone();
+        move || place(p.as_ref(), &req, mint)
     })
     .await;
+    let mut placed = match placing {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response();
+        }
+    };
 
-    match outcome {
-        Ok(o) => Json(o).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
+    // Mint and record each key, then ask the provider to send one mail per
+    // invitation. Both halves are separate from the sharing above because one
+    // needs the bus and the other needs the share ids the provider just
+    // issued.
+    let mut invitations = Vec::new();
+    if let (Some(slug), Some(entry)) = (landing.as_deref(), placed.entry.clone()) {
+        let exp = now_unix() + app.keyed.ttl_secs as i64;
+        for (address, share) in &placed.keyed {
+            let key = crate::keyed::Key::mint();
+            let Ok(verifier) = key.verifier(&app.secret) else {
+                placed.failed.push(ShareFailure {
+                    target: ShareTarget::Email(address.clone()),
+                    code: "mint_failed",
+                    detail: "this service could not mint a key for that address".to_owned(),
+                });
+                continue;
+            };
+            let link = crate::keyed::Link {
+                verifier,
+                room: entry.room.clone(),
+                doc: req.id.clone(),
+                app: slug.to_owned(),
+                permission: req.permission,
+                recipient: address.clone(),
+                owner: session.user.clone(),
+                share: share.id.clone(),
+                exp,
+                max_uses: app.keyed.max_uses,
+            };
+            if !app.store.put_keyed_link(&key.handle, &link, app.keyed.ttl_secs).await {
+                placed.failed.push(ShareFailure {
+                    target: ShareTarget::Email(address.clone()),
+                    code: "store_failed",
+                    detail: "this service could not record a key for that address".to_owned(),
+                });
+                continue;
+            }
+            // The handle identifies the link for diagnosis. The key itself
+            // appears in the response and in the mail and in no log line
+            // anywhere, because a log is read by people who were never given
+            // the link.
+            tracing::info!(link = %key.handle, room = %entry.room, app = %slug, "minted a keyed link");
+            invitations.push((address.clone(), app.keyed.url(&key), exp));
+        }
+
+        let sharer = placed.sharer.clone().unwrap_or_else(|| session.display.clone());
+        let delivery = deliver(&p, &invitations, &sharer, &entry.name).await;
+        for ((address, url, expires), outcome) in invitations.into_iter().zip(delivery) {
+            placed.keyed_out.push(KeyedOutcome {
+                target: ShareTarget::Email(address),
+                url,
+                expires,
+                uses: app.keyed.max_uses,
+                delivered: outcome == DELIVERED,
+                delivery: outcome,
+            });
+        }
     }
+
+    Json(ShareOutcome { shared: placed.shared, failed: placed.failed, keyed: placed.keyed_out }).into_response()
+}
+
+/// Which app a recipient with no account would be sent into.
+///
+/// `None` means no key is minted for this share. Either the sharing app named
+/// no app, or it named one this deployment does not host, or it named one the
+/// sharer may not open. The last is the one that matters: nobody may hand a
+/// recipient a build they could not open themselves.
+fn landing_app(app: &App, session: &Session, named: Option<&str>) -> Option<String> {
+    let name = named?.trim();
+    if !app.is_app(name) || !app.permissions.may_open(session, name) {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+/// What one blocking pass over the provider produced.
+struct Placed {
+    shared: Vec<craft_cloud::Share>,
+    failed: Vec<ShareFailure>,
+    /// Address and share for every recipient who needs a keyed link.
+    keyed: Vec<(String, craft_cloud::Share)>,
+    keyed_out: Vec<KeyedOutcome>,
+    /// The document, for the room a key names and the name a mail mentions.
+    entry: Option<craft_cloud::Entry>,
+    /// What to call the sharer in that mail.
+    sharer: Option<String>,
+}
+
+/// Record every share the request asked for.
+///
+/// One blocking hop, because each provider call here is synchronous and would
+/// stall the runtime inline.
+fn place(p: &(dyn Provider + Send + Sync), req: &ShareRequest, mint: bool) -> Placed {
+    let mut out = Placed {
+        shared: Vec::new(),
+        failed: Vec::new(),
+        keyed: Vec::new(),
+        keyed_out: Vec::new(),
+        entry: p.stat(&req.id).ok(),
+        sharer: craft_cloud::Accounts::me(p).ok().map(|i| i.display),
+    };
+
+    for target in &req.targets {
+        // Whether this address needs a keyed link is asked of the provider,
+        // never taken from the request. A client naming an address proves
+        // nothing about whether an account answers to it, and the answer
+        // decides between two quite different kinds of share.
+        let external = match target {
+            ShareTarget::Email(address) if mint && !has_account(p, address) => Some(address.clone()),
+            _ => None,
+        };
+
+        let options = craft_cloud::ShareOptions {
+            note: req.note.clone(),
+            // The provider's own mail carries the provider's own link, which a
+            // recipient with no account cannot use. So for a keyed target this
+            // service sends the mail instead, carrying the link that works.
+            notify: req.notify && external.is_none(),
+            password: req.password.clone(),
+            expires: req.expires.clone(),
+        };
+        match p.share(&req.id, target, req.permission, &options) {
+            Ok(s) => {
+                if let Some(address) = external {
+                    out.keyed.push((address, s.clone()));
+                }
+                out.shared.push(s);
+            }
+            Err(e) => {
+                let code = match &e {
+                    craft_cloud::Error::NotFound { .. } => "not_found",
+                    craft_cloud::Error::Forbidden(_) => "forbidden",
+                    craft_cloud::Error::Unreachable(_) => "unreachable",
+                    _ => "failed",
+                };
+                out.failed.push(ShareFailure { target: target.clone(), code, detail: e.to_string() });
+            }
+        }
+    }
+    out
+}
+
+/// Whether an account at the provider answers to an address.
+///
+/// The contact search states the kind of share each match wants, so an address
+/// an account holds comes back as a user or a group. Anything else counts as
+/// no account, including a search the provider will not run. That is the safe
+/// way round: the recipient then gets a key that works rather than a user
+/// share to a user who does not exist.
+fn has_account(p: &(dyn Provider + Send + Sync), address: &str) -> bool {
+    let Ok(found) = p.search(address, 5) else { return false };
+    found.iter().any(|c| {
+        matches!(c.target, ShareTarget::User(_) | ShareTarget::Group(_))
+            && (c.id.eq_ignore_ascii_case(address) || c.email.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(address)))
+    })
+}
+
+/// What a delivered invitation is reported as.
+const DELIVERED: &str = "mail";
+
+/// Ask the provider to mail every invitation.
+///
+/// The only delivery path. This service opens no connection to a mail server
+/// and holds no mail credential, so a provider that sends no mail of its own
+/// means the sharer passes the link on themselves. Reported rather than
+/// hidden, which is why the link comes back in the response as well.
+async fn deliver(p: &Shared, invitations: &[(String, String, i64)], sharer: &str, document: &str) -> Vec<&'static str> {
+    if invitations.is_empty() {
+        return Vec::new();
+    }
+    if !p.supports(craft_cloud::Capability::Mail) {
+        return vec!["mail_unsupported"; invitations.len()];
+    }
+    let messages: Vec<craft_cloud::MailMessage> =
+        invitations.iter().map(|(address, url, _)| crate::keyed::invitation(address, sharer, document, url)).collect();
+    let count = messages.len();
+    let p = p.clone();
+    let sending = tokio::task::spawn_blocking(move || {
+        messages
+            .iter()
+            .map(|m| match craft_cloud::Mail::send(p.as_ref(), m) {
+                Ok(()) => DELIVERED,
+                Err(craft_cloud::Error::Unsupported(_)) => "mail_unsupported",
+                Err(e) => {
+                    tracing::warn!(error = %e, "the provider would not send an invitation");
+                    "mail_failed"
+                }
+            })
+            .collect::<Vec<&'static str>>()
+    })
+    .await;
+    sending.unwrap_or_else(|_| vec!["mail_failed"; count])
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 pub async fn shares(State(app): State<Arc<App>>, session: Session, Query(q): Query<IdQuery>) -> Response {
@@ -317,10 +550,22 @@ pub async fn shares(State(app): State<Arc<App>>, session: Session, Query(q): Que
     run(move || p.shares(&q.id)).await
 }
 
+/// Withdraw one share.
+///
+/// Withdrawing it also withdraws every keyed link minted from it. A key that
+/// outlived its share would be a grant the sharer could no longer see and no
+/// longer take back, which is the one thing a revocation has to prevent.
 pub async fn unshare(State(app): State<Arc<App>>, session: Session, Path(share_id): Path<String>) -> Response {
     let Some(p): Option<Shared> = app.provider_for(&session).await else { return not_linked() };
-    match tokio::task::spawn_blocking(move || p.unshare(&share_id)).await {
-        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+    let id = share_id.clone();
+    match tokio::task::spawn_blocking(move || p.unshare(&id)).await {
+        Ok(Ok(())) => {
+            let dropped = app.store.drop_keyed_links_for_share(&share_id).await;
+            if dropped > 0 {
+                tracing::info!(share = %share_id, dropped, "withdrew the keyed links for a share");
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(Err(e)) => fail(e),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "panic", detail: e.to_string() })).into_response(),
     }

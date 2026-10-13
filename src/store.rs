@@ -210,3 +210,95 @@ impl Store {
         }
     }
 }
+
+/// Keyed links, for a recipient with no account.
+///
+/// Three keys per link, each with the same expiry. The record is written once
+/// and never rewritten, the use counter is its own integer so `INCR` can
+/// settle a race without a script, and an index under the provider's share id
+/// is what lets withdrawing a share withdraw every key minted from it.
+///
+/// No key material is stored. What the record holds is an HMAC over it, so a
+/// copy of this keyspace opens no document.
+impl Store {
+    fn keyed_key(&self, handle: &str) -> String {
+        format!("{}:keyed:{handle}", self.prefix)
+    }
+
+    fn keyed_uses_key(&self, handle: &str) -> String {
+        format!("{}:keyed:{handle}:uses", self.prefix)
+    }
+
+    fn keyed_share_key(&self, share: &str) -> String {
+        format!("{}:keyedshare:{share}", self.prefix)
+    }
+
+    /// Record a freshly minted link.
+    pub async fn put_keyed_link(&self, handle: &str, link: &crate::keyed::Link, ttl_secs: u64) -> bool {
+        let Some(mut c) = self.conn().await else { return false };
+        let Ok(body) = serde_json::to_string(link) else { return false };
+        if c.set_ex::<_, _, ()>(self.keyed_key(handle), body, ttl_secs).await.is_err() {
+            return false;
+        }
+        // Indexed by the provider's share, so withdrawing that withdraws this
+        // without having to search the keyspace for it.
+        let index = self.keyed_share_key(&link.share);
+        let _ = c.sadd::<_, _, ()>(&index, handle).await;
+        let _ = c.expire::<_, ()>(&index, ttl_secs as i64).await;
+        true
+    }
+
+    pub async fn keyed_link(&self, handle: &str) -> Option<crate::keyed::Link> {
+        let mut c = self.conn().await?;
+        let body: String = c.get(self.keyed_key(handle)).await.ok()?;
+        serde_json::from_str(&body).ok()
+    }
+
+    /// How many times a key has been spent.
+    ///
+    /// An absent counter means none, which is also what a fresh link looks
+    /// like, so the two need not be told apart. A bus this cannot reach
+    /// answers with the ceiling instead, so an outage refuses keys rather than
+    /// admitting every one of them.
+    pub async fn keyed_uses(&self, handle: &str) -> u32 {
+        let Some(mut c) = self.conn().await else { return u32::MAX };
+        c.get::<_, Option<u32>>(self.keyed_uses_key(handle)).await.ok().flatten().unwrap_or(0)
+    }
+
+    /// Spend one use. Returns whether this caller got one.
+    ///
+    /// `INCR` then compare, which is what makes it safe with more than one
+    /// instance: two recipients racing for the last use of a key get
+    /// different numbers and only one of them is inside the ceiling. A read
+    /// followed by a write would hand that use to both.
+    pub async fn spend_keyed_link(&self, handle: &str, max_uses: u32, ttl_secs: u64) -> bool {
+        let Some(mut c) = self.conn().await else { return false };
+        let key = self.keyed_uses_key(handle);
+        let Ok(count) = c.incr::<_, _, i64>(&key, 1i64).await else { return false };
+        // Expiry on every spend, so the counter never outlives the record it
+        // counts for and a key cannot come back to life as unused.
+        let _ = c.expire::<_, ()>(&key, ttl_secs as i64).await;
+        count > 0 && count <= i64::from(max_uses)
+    }
+
+    /// Withdraw every key minted from one share.
+    ///
+    /// Called when the share itself is withdrawn. The record is what every
+    /// recipient route re-reads, so deleting it ends the sessions it created
+    /// as well as the links, and those sessions are dropped here too rather
+    /// than left to expire.
+    pub async fn drop_keyed_links_for_share(&self, share: &str) -> usize {
+        let Some(mut c) = self.conn().await else { return 0 };
+        let index = self.keyed_share_key(share);
+        let handles: Vec<String> = c.smembers(&index).await.unwrap_or_default();
+        for handle in &handles {
+            let _ = c.del::<_, ()>(self.keyed_key(handle)).await;
+            let _ = c.del::<_, ()>(self.keyed_uses_key(handle)).await;
+        }
+        let _ = c.del::<_, ()>(&index).await;
+        for handle in &handles {
+            self.drop_sessions_for(&crate::session::Guest::user_id(handle)).await;
+        }
+        handles.len()
+    }
+}

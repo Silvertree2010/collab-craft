@@ -28,6 +28,13 @@ use crate::state::App;
 /// The cookie a browser session rides in.
 pub const COOKIE: &str = "collabcraft_session";
 
+/// The cookie a keyed link's recipient rides in.
+///
+/// Its own name on purpose. Following an invitation must not sign out whoever
+/// is already signed in on that browser, and a single cookie would do exactly
+/// that.
+pub const GUEST_COOKIE: &str = "collabcraft_guest";
+
 /// Who is making a request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
@@ -40,6 +47,52 @@ pub struct Session {
     /// from these, so adding somebody to a group there is the whole of
     /// granting access here.
     pub groups: Vec<String>,
+    /// Set when this session came from a keyed link rather than a sign-in.
+    ///
+    /// Defaulted on read, so sessions written before this existed still load.
+    #[serde(default)]
+    pub guest: Option<Guest>,
+}
+
+/// A recipient who followed a keyed link.
+///
+/// Present on a session means the holder has no account anywhere, so it
+/// bounds what they may reach: one room, one document, one app. Entitlement
+/// is computed from this and never from the request, which is what keeps a
+/// recipient out of every other app this deployment hosts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Guest {
+    /// The keyed link's lookup handle. Checked on every request, because
+    /// withdrawing the share deletes the record and the session has to stop
+    /// working with it.
+    pub link: String,
+    pub room: String,
+    /// The provider's handle for the document. Used by the service on the
+    /// recipient's behalf and never sent to them.
+    pub doc: String,
+    /// The one app this recipient may load.
+    pub app: String,
+    /// What was granted when the link was followed. A hint for the roster
+    /// only: every request re-reads the grant from the provider.
+    pub permission: craft_cloud::Permission,
+}
+
+impl Guest {
+    /// The user identifier a recipient carries.
+    ///
+    /// Derived from the link handle, so two windows are one recipient and
+    /// revoking the link can find the sessions it created. Prefixed so it can
+    /// never collide with an identity provider's subject.
+    pub fn user_id(handle: &str) -> String {
+        format!("guest:{handle}")
+    }
+}
+
+impl Session {
+    /// Whether this session came from a keyed link.
+    pub fn is_guest(&self) -> bool {
+        self.guest.is_some()
+    }
 }
 
 /// Rejecting a request that carries no usable session.
@@ -60,13 +113,22 @@ impl FromRequestParts<Arc<App>> for Session {
     /// to carry it, and a browser cannot be asked to hold a bearer token
     /// safely while a desktop app cannot be asked to hold a cookie.
     async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> Result<Session, NoSession> {
-        if let Some(id) = bearer(parts).or_else(|| cookie(parts, COOKIE))
+        if let Some(id) = carried(parts)
             && let Some(session) = app.store.session(&id).await
         {
             return Ok(session);
         }
         Err(NoSession)
     }
+}
+
+/// The session id a request carries, from whichever place it rides in.
+///
+/// A signed-in account wins over a keyed link. Somebody who is signed in and
+/// then follows an invitation is still that person, and they hold more than
+/// the invitation grants.
+fn carried(parts: &Parts) -> Option<String> {
+    bearer(parts).or_else(|| cookie(parts, COOKIE)).or_else(|| cookie(parts, GUEST_COOKIE))
 }
 
 fn bearer(parts: &Parts) -> Option<String> {
@@ -179,7 +241,9 @@ impl Oidc {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|g| g.as_str()).map(str::to_owned).collect())
             .unwrap_or_default();
-        Ok(Session { user, display, email, groups })
+        // Never a recipient. This path is a sign-in, and a keyed link is the
+        // other thing entirely.
+        Ok(Session { user, display, email, groups, guest: None })
     }
 }
 
@@ -221,7 +285,7 @@ impl OptionalFromRequestParts<Arc<App>> for Session {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> Result<Option<Session>, std::convert::Infallible> {
-        if let Some(id) = bearer(parts).or_else(|| cookie(parts, COOKIE)) {
+        if let Some(id) = carried(parts) {
             return Ok(app.store.session(&id).await);
         }
         Ok(None)
