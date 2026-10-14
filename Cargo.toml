@@ -11,7 +11,7 @@ rust-version = "1.95"
 # the Craft applications use. These crates exist to be linked by those
 # applications. A copyleft licence here would reach every one of them.
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/wdunn001/collabcraft"
+repository = "https://github.com/storytold/collab-craft"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -27,8 +27,8 @@ todo = "warn"
 # craft-ui speaks the craft-cloud vocabulary, so two revisions put two
 # `Permission` types in one binary and nothing can be passed between them.
 [workspace.dependencies]
-craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "289d562cc6e8b567819aee51f759a78f41a65454" }
-craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "289d562cc6e8b567819aee51f759a78f41a65454" }
+craft-cloud = { git = "https://github.com/storytold/craft-libs", rev = "289d562cc6e8b567819aee51f759a78f41a65454" }
+craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "289d562cc6e8b567819aee51f759a78f41a65454" }
 craft-collab = { path = "crates/collab" }
 craft-cloud-client = { path = "crates/cloud-client" }
 craft-nextcloud = { path = "crates/nextcloud" }
@@ -52,7 +52,7 @@ edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 description = "The CollabCraft relay: verifies Nextcloud-issued tokens, orders document edits and arbitrates scope locks"
-repository = "https://github.com/wdunn001/collabcraft"
+repository = "https://github.com/storytold/collab-craft"
 
 [[bin]]
 name = "collabcraft-relay"

@@ -1,5 +1,5 @@
 {
-    "name": "wdunn001/collabcraft",
+    "name": "storytold/collab-craft",
     "description": "Shared editing for the Craft apps: a Nextcloud control plane beside a relay",
     "license": "AGPL-3.0-or-later",
     "type": "project",

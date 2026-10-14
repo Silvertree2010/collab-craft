@@ -16,7 +16,7 @@
 # else already serves the WebAssembly.
 services:
   collabcraft:
-    image: ${COLLABCRAFT_IMAGE:-ghcr.io/wdunn001/collabcraft:latest}
+    image: ${COLLABCRAFT_IMAGE:-ghcr.io/storytold/collab-craft:latest}
     container_name: collabcraft
     restart: unless-stopped
     env_file: .env
