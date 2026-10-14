@@ -155,7 +155,14 @@ pub struct LinkStart {
 /// Uses the provider's own desktop login flow, so this service never sees the
 /// account password and gets a device-scoped credential it can revoke.
 pub async fn link_start(State(app): State<Arc<App>>, session: Session) -> Response {
-    let base = app.provider_base.clone();
+    let Some((config, _)) = app.provider_config().await else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(crate::api::ApiError { code: "provider_not_configured", detail: "this deployment has no cloud provider configured".to_owned() }),
+        )
+            .into_response();
+    };
+    let base = config.base;
     let flow = tokio::task::spawn_blocking(move || {
         let http = crate::transport::ReqwestHttp::default();
         craft_nextcloud::begin(&http, &base)

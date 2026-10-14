@@ -279,7 +279,7 @@ mod keyed_links {
         App {
             secret: SECRET.to_vec(),
             relay_url: "https://craft.example.com".to_owned(),
-            provider_base: "https://cloud.example.com".to_owned(),
+            settings: crate::settings::Settings::decide(Some("https://cloud.example.com"), None, None),
             permissions: Permissions::from_env(),
             store: crate::store::Store::new("redis://127.0.0.1:6379/15", "collabcraft:test").expect("a client, not a connection"),
             oidc: None,
@@ -722,5 +722,463 @@ mod keyed_links {
         };
         assert!(store.put_keyed_link(&key.handle, &link, 3600).await);
         std::fs::write(&out, key.wire()).expect("the key is written where the shell can read it");
+    }
+}
+
+/// The web face: who may open what, who may configure the provider, and which
+/// provider wins.
+///
+/// Its own module for the same reason as the one above. Every decision under
+/// test is a pure function over configuration and a session, or a handler that
+/// refuses before it reaches the bus. None of them needs a datastore.
+mod web {
+
+    use std::sync::Arc;
+
+    use axum::extract::{Form, Query, State};
+    use axum::http::StatusCode;
+    use craft_cloud::{Capability, Permission};
+
+    use crate::keyed::Policy;
+    use crate::pages::{self, Flash, ProviderForm};
+    use crate::session::{Guest, Session};
+    use crate::settings::{ProviderConfig, Settings, Source};
+    use crate::state::{App, Permissions};
+
+    use super::SECRET;
+
+    /// A service, as far as anything below needs one.
+    ///
+    /// Nothing here opens a socket. The store holds a client and not a
+    /// connection, and every assertion is about what this deployment permits
+    /// or draws.
+    fn service(permissions: Permissions, settings: Settings, hosted: &[&str]) -> App {
+        App {
+            secret: SECRET.to_vec(),
+            relay_url: "https://craft.example.com".to_owned(),
+            settings,
+            permissions,
+            store: crate::store::Store::new("redis://127.0.0.1:6379/15", "collabcraft:test").expect("a client, not a connection"),
+            oidc: None,
+            http: reqwest::Client::new(),
+            web: tower_http::services::ServeDir::new("."),
+            hosted: hosted.iter().map(|a| (*a).to_owned()).collect(),
+            keyed: Policy::decide(None, "https://craft.example.com", None, None),
+        }
+    }
+
+    fn signed_in(groups: &[&str]) -> Session {
+        Session {
+            user: "sub-1".to_owned(),
+            display: "Alice Example".to_owned(),
+            email: Some("alice@example.com".to_owned()),
+            groups: groups.iter().map(|g| (*g).to_owned()).collect(),
+            guest: None,
+        }
+    }
+
+    fn recipient(app: &str) -> Session {
+        Session {
+            user: Guest::user_id("handle-1"),
+            display: "outsider@example.org".to_owned(),
+            email: Some("outsider@example.org".to_owned()),
+            groups: Vec::new(),
+            guest: Some(Guest {
+                link: "handle-1".to_owned(),
+                room: "room-7".to_owned(),
+                doc: "/Documents/Budget.xlsx".to_owned(),
+                app: app.to_owned(),
+                permission: Permission::Edit,
+            }),
+        }
+    }
+
+    fn env_provider(url: &str) -> Settings {
+        Settings::decide(Some(url), None, None)
+    }
+
+    fn admin_settings() -> Settings {
+        Settings::decide(Some("https://cloud.example.com"), None, Some("craft-admins"))
+    }
+
+    /// An identity provider, as far as a page needs one.
+    ///
+    /// Nothing here dials it. A page only asks whether this deployment has
+    /// one, because that decides whether a sign-in can work at all.
+    fn identity_provider() -> crate::session::Oidc {
+        crate::session::Oidc {
+            client_id: "collabcraft".to_owned(),
+            client_secret: "not a real client secret".to_owned(),
+            redirect_uri: "https://craft.example.com/auth/callback".to_owned(),
+            discovery: crate::session::Discovery {
+                authorization_endpoint: "https://id.example.com/authorize".to_owned(),
+                token_endpoint: "https://id.example.com/token".to_owned(),
+                userinfo_endpoint: "https://id.example.com/userinfo".to_owned(),
+            },
+        }
+    }
+
+    fn form(csrf: &str, kind: &str, base: &str, action: &str) -> ProviderForm {
+        ProviderForm { csrf: csrf.to_owned(), kind: kind.to_owned(), base: base.to_owned(), action: action.to_owned() }
+    }
+
+    // ---- what the launcher may draw -----------------------------------------
+
+    #[test]
+    fn the_launcher_draws_only_what_this_deployment_hosts() {
+        // An entitlement to an application nobody deployed opens nothing. A
+        // card for it would be a tile over a 404.
+        let app = service(Permissions::decide("gridcraft,wordcraft", &[]), env_provider("https://cloud.example.com"), &["gridcraft"]);
+        assert_eq!(app.launchable(&signed_in(&[])), vec!["gridcraft".to_owned()]);
+    }
+
+    #[test]
+    fn an_application_nobody_is_entitled_to_draws_no_card() {
+        let app = service(Permissions::decide("gridcraft", &[]), env_provider("https://cloud.example.com"), &["gridcraft", "pdfcraft"]);
+        let launchable = app.launchable(&signed_in(&[]));
+        assert_eq!(launchable, vec!["gridcraft".to_owned()]);
+        assert!(!launchable.contains(&"pdfcraft".to_owned()), "hosting an application is not granting it");
+    }
+
+    #[test]
+    fn a_group_adds_to_what_the_default_grants() {
+        let permissions = Permissions::decide("gridcraft", &[("editors", "wordcraft,deckcraft")]);
+        let app = service(permissions, env_provider("https://cloud.example.com"), &["gridcraft", "wordcraft", "deckcraft"]);
+        assert_eq!(app.launchable(&signed_in(&[])), vec!["gridcraft".to_owned()]);
+        assert_eq!(
+            app.launchable(&signed_in(&["editors"])),
+            vec!["deckcraft".to_owned(), "gridcraft".to_owned(), "wordcraft".to_owned()],
+            "membership of one group is the whole of granting the rest"
+        );
+    }
+
+    #[test]
+    fn a_group_name_matches_whatever_case_the_identity_provider_reports() {
+        let permissions = Permissions::decide("", &[("Craft-Editors", "wordcraft")]);
+        let app = service(permissions, env_provider("https://cloud.example.com"), &["wordcraft"]);
+        for reported in ["craft-editors", "Craft-Editors", "CRAFT-EDITORS"] {
+            assert_eq!(app.launchable(&signed_in(&[reported])), vec!["wordcraft".to_owned()], "{reported} is the same group");
+        }
+    }
+
+    #[test]
+    fn a_recipient_may_launch_only_the_application_their_link_names() {
+        let hosted = ["gridcraft", "wordcraft"];
+        let app = service(Permissions::decide("gridcraft,wordcraft", &[]), env_provider("https://cloud.example.com"), &hosted);
+        assert_eq!(app.launchable(&recipient("gridcraft")), vec!["gridcraft".to_owned()]);
+        assert_eq!(app.launchable(&recipient("wordcraft")), vec!["wordcraft".to_owned()]);
+    }
+
+    #[test]
+    fn a_recipient_sent_into_an_application_nobody_hosts_may_launch_nothing() {
+        let app = service(Permissions::decide("gridcraft", &[]), env_provider("https://cloud.example.com"), &["gridcraft"]);
+        assert!(app.launchable(&recipient("cadcraft")).is_empty());
+    }
+
+    // ---- who may configure the provider -------------------------------------
+
+    #[test]
+    fn only_a_member_of_a_named_group_may_change_the_provider() {
+        let settings = admin_settings();
+        assert!(settings.may_configure(&signed_in(&["craft-admins"])));
+        assert!(!settings.may_configure(&signed_in(&["editors"])));
+        assert!(!settings.may_configure(&signed_in(&[])));
+    }
+
+    #[test]
+    fn the_configuring_group_matches_whatever_case_is_reported() {
+        let settings = Settings::decide(None, None, Some(" Craft-Admins , platform "));
+        for reported in ["craft-admins", "CRAFT-ADMINS", "Craft-Admins", "platform", "PLATFORM"] {
+            assert!(settings.may_configure(&signed_in(&[reported])), "{reported} names a configuring group");
+        }
+        assert!(!settings.may_configure(&signed_in(&["craft-admins-readonly"])), "a longer name is a different group");
+    }
+
+    #[test]
+    fn a_deployment_naming_no_group_lets_nobody_change_the_provider() {
+        // The safe way round. A deployment that never said who may configure
+        // it has nobody who may, so the page refuses everybody and the control
+        // appears for nobody.
+        for groups in [None, Some(""), Some("  "), Some(" , ")] {
+            let settings = Settings::decide(Some("https://cloud.example.com"), None, groups);
+            assert!(settings.admin_groups().is_empty(), "{groups:?} names no group");
+            assert!(!settings.may_configure(&signed_in(&["craft-admins"])));
+            let app = service(Permissions::decide("", &[]), settings, &[]);
+            assert_eq!(pages::who_may(&app), "Nobody. This deployment names no group for it.");
+        }
+    }
+
+    #[test]
+    fn a_recipient_may_never_change_the_provider() {
+        // A recipient carries no group, so the group check would refuse them
+        // anyway. Refusing on the session as well means a deployment that
+        // somehow granted a group to one still refuses.
+        let settings = admin_settings();
+        let mut holding_a_group = recipient("gridcraft");
+        holding_a_group.groups = vec!["craft-admins".to_owned()];
+        assert!(!settings.may_configure(&recipient("gridcraft")));
+        assert!(!settings.may_configure(&holding_a_group));
+    }
+
+    #[test]
+    fn the_page_names_the_group_that_may_change_the_provider() {
+        let one = service(Permissions::decide("", &[]), Settings::decide(None, None, Some("craft-admins")), &[]);
+        assert_eq!(pages::who_may(&one), "Members of the group craft-admins.");
+        let two = service(Permissions::decide("", &[]), Settings::decide(None, None, Some("craft-admins,platform")), &[]);
+        assert_eq!(pages::who_may(&two), "Members of these groups: craft-admins, platform.");
+    }
+
+    // ---- where the provider comes from --------------------------------------
+
+    #[test]
+    fn a_stored_provider_overrides_the_environment() {
+        let settings = env_provider("https://env.example.com");
+        let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: "https://stored.example.com".to_owned() };
+        let (config, source) = settings.resolve(Some(stored)).expect("a provider");
+        assert_eq!(config.base, "https://stored.example.com");
+        assert_eq!(source, Source::Stored);
+    }
+
+    #[test]
+    fn a_deployment_that_stores_nothing_keeps_its_environment_provider() {
+        // The whole of the compatibility promise. A deployment upgraded into
+        // this stores nothing, so it stays on exactly the provider it had.
+        let settings = env_provider("https://env.example.com/");
+        let (config, source) = settings.resolve(None).expect("a provider");
+        assert_eq!(config.base, "https://env.example.com", "a trailing slash is normalised away");
+        assert_eq!(config.kind, "nextcloud");
+        assert_eq!(source, Source::Environment);
+    }
+
+    #[test]
+    fn a_stored_record_naming_no_address_is_ignored() {
+        // A half-written record must not take a working deployment off its
+        // provider.
+        let settings = env_provider("https://env.example.com");
+        for empty in ["", "   "] {
+            let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: empty.to_owned() };
+            let (config, source) = settings.resolve(Some(stored)).expect("the environment still answers");
+            assert_eq!(config.base, "https://env.example.com");
+            assert_eq!(source, Source::Environment);
+        }
+    }
+
+    #[test]
+    fn a_deployment_with_neither_has_no_provider() {
+        let settings = Settings::decide(None, None, None);
+        assert!(settings.resolve(None).is_none());
+        assert!(settings.env_default().is_none());
+    }
+
+    #[test]
+    fn the_environment_default_is_still_reported_once_something_is_stored() {
+        // The setup page says which of the two is in use. That needs both.
+        let settings = env_provider("https://env.example.com");
+        let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: "https://stored.example.com".to_owned() };
+        assert_eq!(settings.resolve(Some(stored)).map(|(c, _)| c.base), Some("https://stored.example.com".to_owned()));
+        assert_eq!(settings.env_default().map(|c| c.base.clone()), Some("https://env.example.com".to_owned()));
+    }
+
+    #[test]
+    fn an_address_that_is_not_a_server_address_is_refused() {
+        for bad in ["", "   ", "cloud.example.com", "ftp://cloud.example.com", "https://", "https:///files", "javascript:alert(1)"] {
+            assert!(ProviderConfig::parse("nextcloud", bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn an_address_carrying_a_credential_or_a_query_is_refused() {
+        // Accepting one would put a credential into configuration every
+        // administrator can read.
+        for bad in [
+            "https://user:secret@cloud.example.com",
+            "https://cloud.example.com?token=abc",
+            "https://cloud.example.com#/apps/files",
+            "https://cloud example.com",
+        ] {
+            assert!(ProviderConfig::parse("nextcloud", bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn an_address_that_is_a_server_address_is_accepted_and_tidied() {
+        let config = ProviderConfig::parse(" NextCloud ", "  https://cloud.example.com/  ").expect("accepted");
+        assert_eq!(config.kind, "nextcloud");
+        assert_eq!(config.base, "https://cloud.example.com");
+        assert_eq!(ProviderConfig::parse("nextcloud", "http://cloud.internal:8080").expect("accepted").base, "http://cloud.internal:8080");
+    }
+
+    #[test]
+    fn a_kind_this_binary_does_not_implement_is_refused() {
+        // Offered nowhere in the form either. Storing one would leave a
+        // deployment pointed at something nothing here can speak to.
+        for bad in ["", "owncloud", "seafile", "nextcloud-ng"] {
+            assert!(ProviderConfig::parse(bad, "https://cloud.example.com").is_err(), "{bad:?} must be refused");
+        }
+        assert!(ProviderConfig::parse("nextcloud", "https://cloud.example.com").is_ok());
+    }
+
+    #[test]
+    fn an_unusable_environment_address_leaves_the_deployment_with_no_provider() {
+        // Reported as no provider at all. Half-believing a malformed address
+        // would leave every route failing on use with nothing said at startup.
+        let settings = Settings::decide(Some("cloud.example.com"), None, None);
+        assert!(settings.env_default().is_none());
+        assert!(settings.resolve(None).is_none());
+    }
+
+    // ---- the pages themselves -----------------------------------------------
+
+    #[test]
+    fn an_anonymous_visitor_is_offered_a_sign_in_and_never_a_refusal() {
+        let mut app = service(Permissions::decide("gridcraft", &[]), env_provider("https://cloud.example.com"), &["gridcraft"]);
+        app.oidc = Some(identity_provider());
+        let page = pages::layout("Welcome", None, &pages::welcome(&app));
+        assert!(page.contains("/auth/login"), "an anonymous visitor gets somewhere to go");
+        for refusal in ["403", "Forbidden", "not permitted", "unauthenticated"] {
+            assert!(!page.contains(refusal), "nobody has been refused anything yet, so {refusal} has no place here");
+        }
+    }
+
+    #[test]
+    fn a_deployment_with_no_identity_provider_offers_no_sign_in() {
+        // The control cannot work, so it is not drawn.
+        let app = service(Permissions::decide("", &[]), env_provider("https://cloud.example.com"), &[]);
+        assert!(app.oidc.is_none());
+        let page = pages::layout("Welcome", None, &pages::welcome(&app));
+        assert!(!page.contains("/auth/login"), "a sign-in with nowhere to go is not offered");
+        assert!(page.contains("no identity provider configured"), "the page says why instead");
+    }
+
+    #[test]
+    fn the_launcher_names_no_provider_and_carries_no_credential() {
+        // What a browser receives is bounded. The address of the provider is
+        // for the group entitled to change it.
+        let app = service(Permissions::decide("gridcraft", &[]), env_provider("https://cloud.example.com"), &["gridcraft"]);
+        let page = pages::layout("Applications", Some(&signed_in(&[])), &pages::card("gridcraft"));
+        let haystack = format!("{page}{}", pages::welcome(&app)).to_lowercase();
+        for leak in ["cloud.example.com", "nextcloud", "webdav", "ocs", "password", "valkey", "redis", "secret"] {
+            assert!(!haystack.contains(leak), "a page must not mention {leak}");
+        }
+    }
+
+    #[test]
+    fn the_setup_page_names_the_address_because_that_group_may_change_it() {
+        let app = service(Permissions::decide("gridcraft", &[]), admin_settings(), &["gridcraft"]);
+        let stored = ProviderConfig { kind: "nextcloud".to_owned(), base: "https://stored.example.com".to_owned() };
+        let in_use = (stored, Source::Stored);
+        let body = pages::provider_body(&app, &signed_in(&["craft-admins"]), Some(&in_use), None, None);
+        assert!(body.contains("https://stored.example.com"), "the address in use is the point of the page");
+        assert!(body.contains("https://cloud.example.com"), "so is the environment default it overrides");
+        assert!(body.contains("set on this page"), "and which of the two is in use");
+        assert!(body.contains("craft-admins"), "the page says who may change it");
+    }
+
+    #[test]
+    fn the_setup_page_hands_back_what_somebody_typed() {
+        // A refused form comes back with their own text in it, escaped.
+        let app = service(Permissions::decide("gridcraft", &[]), admin_settings(), &["gridcraft"]);
+        let typed = form("", "nextcloud", "https://typo.example.com\" onload=\"x", "save");
+        let body = pages::provider_body(&app, &signed_in(&["craft-admins"]), None, None, Some(&typed));
+        assert!(body.contains("https://typo.example.com&quot; onload=&quot;x"), "their text comes back as text");
+        assert!(!body.contains("onload=\"x\""), "and never as markup");
+    }
+
+    #[test]
+    fn a_page_escapes_what_a_person_called_themselves() {
+        let mut session = signed_in(&[]);
+        session.display = "<script>alert('x')</script>".to_owned();
+        let page = pages::layout("Applications", Some(&session), "");
+        assert!(!page.contains("<script>alert"), "a display name is text and never markup");
+        assert!(page.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn a_card_carries_the_application_name_and_a_stable_tile() {
+        let one = pages::card("gridcraft");
+        assert!(one.contains("href=\"/gridcraft/\""));
+        assert!(one.contains("GridCraft"), "a slug reads as the application's name");
+        assert_eq!(one, pages::card("gridcraft"), "the same application draws the same card every time");
+        assert_ne!(pages::card("wordcraft"), one);
+        // An application this binary has never heard of still gets a card.
+        let unknown = pages::card("sheetworks");
+        assert!(unknown.contains("Sheetworks"));
+        assert!(unknown.contains("--h:"));
+    }
+
+    #[test]
+    fn a_capability_with_nothing_to_say_draws_nothing() {
+        // The account page lists what storage allows. A capability with no
+        // sentence for a person is left out, because an internal name tells
+        // them nothing they can act on.
+        assert_eq!(pages::capability_label(Capability::Sharing), Some("Share a document"));
+        assert_eq!(pages::capability_label(Capability::Etags), None);
+    }
+
+    // ---- forms prove where they came from -----------------------------------
+
+    #[test]
+    fn a_form_token_is_tied_to_one_person() {
+        let mine = pages::csrf(SECRET, "sub-1");
+        assert!(pages::csrf_ok(SECRET, "sub-1", &mine));
+        assert!(!pages::csrf_ok(SECRET, "sub-2", &mine), "another account's form must not act on mine");
+        assert_ne!(pages::csrf(SECRET, "sub-2"), mine);
+    }
+
+    #[test]
+    fn a_form_token_from_another_secret_does_not_pass() {
+        let elsewhere = pages::csrf(b"a-different-secret-also-long-enough-x", "sub-1");
+        assert!(!pages::csrf_ok(SECRET, "sub-1", &elsewhere));
+    }
+
+    #[test]
+    fn a_form_with_no_usable_token_is_refused() {
+        for bad in ["", "   ", "not base64 at all", "AAAA", "!!!!"] {
+            assert!(!pages::csrf_ok(SECRET, "sub-1", bad), "{bad:?} must not pass");
+        }
+    }
+
+    // ---- the gate, through the handler --------------------------------------
+
+    #[tokio::test]
+    async fn the_setup_page_refuses_somebody_outside_the_group() {
+        let app = Arc::new(service(Permissions::decide("gridcraft", &[]), admin_settings(), &["gridcraft"]));
+
+        let outside = pages::provider(State(app.clone()), Some(signed_in(&["editors"])), Query(Flash::default())).await;
+        assert_eq!(outside.status(), StatusCode::FORBIDDEN);
+
+        let recipient_asking = pages::provider(State(app.clone()), Some(recipient("gridcraft")), Query(Flash::default())).await;
+        assert_eq!(recipient_asking.status(), StatusCode::FORBIDDEN);
+
+        // An anonymous visitor is sent to sign in. They have been refused
+        // nothing yet.
+        let anonymous = pages::provider(State(app), None, Query(Flash::default())).await;
+        assert_eq!(anonymous.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn saving_the_provider_refuses_somebody_outside_the_group_before_anything_else() {
+        let app = Arc::new(service(Permissions::decide("gridcraft", &[]), admin_settings(), &["gridcraft"]));
+        // A token this service really did mint, from a session outside the
+        // group. The gate is membership and nothing else.
+        let submitted = form(&pages::csrf(SECRET, "sub-1"), "nextcloud", "https://elsewhere.example.com", "save");
+        let refused = pages::provider_save(State(app), signed_in(&["editors"]), Form(submitted)).await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn saving_the_provider_refuses_a_form_this_service_did_not_serve() {
+        let app = Arc::new(service(Permissions::decide("gridcraft", &[]), admin_settings(), &["gridcraft"]));
+        let submitted = form("borrowed-from-nowhere", "nextcloud", "https://elsewhere.example.com", "save");
+        let refused = pages::provider_save(State(app), signed_in(&["craft-admins"]), Form(submitted)).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn an_address_the_form_refuses_never_reaches_the_network() {
+        let app = Arc::new(service(Permissions::decide("gridcraft", &[]), admin_settings(), &["gridcraft"]));
+        let submitted = form(&pages::csrf(SECRET, "sub-1"), "nextcloud", "cloud.example.com", "save");
+        let refused = pages::provider_save(State(app), signed_in(&["craft-admins"]), Form(submitted)).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "a malformed address is refused before anything is dialled");
     }
 }

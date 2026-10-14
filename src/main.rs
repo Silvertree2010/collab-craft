@@ -15,6 +15,13 @@
 //! | `COLLABCRAFT_KEYED_LINKS` | on | `off` forbids links for recipients with no account |
 //! | `COLLABCRAFT_KEYED_LINK_TTL_HOURS` | 168 | how long one of those links lasts |
 //! | `COLLABCRAFT_KEYED_LINK_USES` | 1 | how often one may be opened |
+//! | `COLLABCRAFT_PROVIDER_URL` | none | the cloud provider, overridden by the setup page |
+//! | `COLLABCRAFT_PROVIDER_KIND` | `nextcloud` | which implementation answers there |
+//! | `COLLABCRAFT_ADMIN_GROUPS` | none | groups whose members may change that from the setup page |
+//!
+//! The provider is the one piece of configuration a page can change. The
+//! environment stays the default. A value stored on the bus overrides it, so
+//! an existing deployment keeps working with nothing touched.
 //!
 //! The Valkey URL uses the estate's DNS name rather than an address, so the
 //! relay follows the instance if it moves. Database index 6 is free: the stack
@@ -25,9 +32,11 @@ mod api;
 mod auth;
 mod bus;
 mod keyed;
+mod pages;
 mod recipient;
 mod room;
 mod session;
+mod settings;
 mod state;
 mod store;
 mod token;
@@ -177,15 +186,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         hosted,
         secret: secret_bytes,
         relay_url: std::env::var("COLLABCRAFT_PUBLIC_RELAY").unwrap_or_else(|_| format!("http://{bind}")),
-        provider_base: std::env::var("COLLABCRAFT_PROVIDER_URL").unwrap_or_default(),
+        settings: settings::Settings::from_env(),
         permissions: state::Permissions::from_env(),
         keyed: keyed::Policy::from_env(),
         store,
         oidc,
         http,
     });
-    if app_state.provider_base.is_empty() {
-        tracing::warn!("COLLABCRAFT_PROVIDER_URL is not set: no account can be linked");
+    // What the deployment is actually on, which is the stored value where
+    // there is one. Logged at startup because a deployment reading its own log
+    // should not have to guess which of the two won.
+    match app_state.provider_config().await {
+        Some((config, settings::Source::Stored)) => {
+            tracing::info!(kind = %config.kind, base = %config.base, "cloud provider, set on the setup page");
+        }
+        Some((config, settings::Source::Environment)) => {
+            tracing::info!(kind = %config.kind, base = %config.base, "cloud provider, from the environment");
+        }
+        None => tracing::warn!("no cloud provider is configured: no account can be linked"),
+    }
+    if app_state.settings.env_default().is_none() && std::env::var("COLLABCRAFT_PROVIDER_URL").is_ok_and(|v| !v.trim().is_empty()) {
+        tracing::warn!("COLLABCRAFT_PROVIDER_URL is set to something that is not a usable server address");
+    }
+    if app_state.settings.admin_groups().is_empty() {
+        tracing::info!("COLLABCRAFT_ADMIN_GROUPS is not set: nobody may change the cloud provider from the setup page");
     }
     if app_state.keyed.enabled() {
         tracing::info!(ttl_secs = app_state.keyed.ttl_secs, uses = app_state.keyed.max_uses, "keyed links are enabled");
@@ -221,11 +245,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/link/poll", axum::routing::post(auth::link_poll))
         .route("/link", axum::routing::delete(auth::unlink));
 
+    // The web face. Server rendered out of this binary, so the service answers
+    // a browser as well as an app. These are real routes, so each one wins
+    // over the static fallback below.
+    let web = axum::Router::new()
+        .route("/", axum::routing::get(pages::launcher))
+        // Where a hand-written entry page used to sit in the web root.
+        .route("/index.html", axum::routing::get(pages::index_html))
+        .route("/account", axum::routing::get(pages::account))
+        .route("/account/link", axum::routing::post(pages::link_begin))
+        .route("/account/link/finish", axum::routing::post(pages::link_finish))
+        .route("/account/unlink", axum::routing::post(pages::unlink))
+        .route("/account/signout", axum::routing::post(pages::signout))
+        .route("/settings/provider", axum::routing::get(pages::provider).post(pages::provider_save));
+
     // with_state goes last, after every route including the fallback.
     // Applying it earlier leaves the fallback still wanting state, and the
     // router then will not serve at all.
     let app = axum::Router::new()
         .route("/healthz", axum::routing::get(|| async { "ok" }))
+        .merge(web)
         .nest("/api/v1", api)
         .nest("/auth", auth_routes)
         // Where a keyed link lands. A real route, so it wins over the static
