@@ -14,14 +14,20 @@ workspace = true
 # Opt in, because rust_socketio pulls native-tls unconditionally and so cannot
 # build for wasm32. The browser build uses the JS socket.io-client instead.
 native-hub = ["dep:rust_socketio", "dep:tokio"]
+# The other side of that. Reaches the `io` the page's own socket.io-client left
+# on the global object, so nothing is bound at link time and a native build has
+# no reason to carry it.
+web-hub = ["dep:js-sys", "dep:wasm-bindgen"]
 
 [dependencies]
+js-sys = { workspace = true, optional = true }
 log = { workspace = true }
 rust_socketio = { version = "0.6", features = ["async"], optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["sync", "rt"], optional = true }
+wasm-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

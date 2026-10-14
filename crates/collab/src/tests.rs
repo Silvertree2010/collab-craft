@@ -3,7 +3,7 @@
 use serde_json::json;
 
 use crate::proto::{ClientMsg, LockState, Presence, ServerMsg};
-use crate::{Effect, Session, decode, encode};
+use crate::{EVENTS, Effect, Session, decode, emit, encode, receive};
 
 const DOC: &str = "doc-42";
 
@@ -329,4 +329,104 @@ fn garbage_decodes_to_an_error_not_a_panic() {
     for bad in ["", "{}", "not json", r#"{"t":"nope"}"#] {
         assert!(decode(bad).is_err(), "{bad:?} must be refused");
     }
+}
+
+// ---- the encoding both hubs share ------------------------------------------
+//
+// Neither hub is tested here; both are a socket away. What is tested is the
+// whole of what they agree on, which is the part that can drift.
+
+#[test]
+fn a_client_message_is_an_event_name_and_only_what_that_event_needs() {
+    let (event, body) = emit(&ClientMsg::Join { doc: DOC.to_owned(), display: "Alice".to_owned() });
+    assert_eq!(event, "join");
+    assert_eq!(body, json!({"display": "Alice"}));
+    assert!(body.get("doc").is_none(), "the relay reads the document off the peer's token, and a body naming one would be a claim");
+}
+
+#[test]
+fn every_client_message_has_an_event_name() {
+    let msgs = [
+        ClientMsg::Join { doc: DOC.to_owned(), display: "Alice".to_owned() },
+        ClientMsg::Leave { doc: DOC.to_owned() },
+        ClientMsg::Submit {
+            doc: DOC.to_owned(),
+            local: 3,
+            command: "cell.set".to_owned(),
+            params: json!({"cell": "B2"}),
+            scope: Some("B2".to_owned()),
+        },
+        ClientMsg::Lock { doc: DOC.to_owned(), scope: "B2".to_owned() },
+        ClientMsg::Unlock { doc: DOC.to_owned(), scope: "B2".to_owned() },
+        ClientMsg::Resync { doc: DOC.to_owned(), have: 9 },
+    ];
+    let names: Vec<&str> = msgs.iter().map(|m| emit(m).0).collect();
+    assert_eq!(names, ["join", "leave", "submit", "lock", "unlock", "resync"]);
+}
+
+#[test]
+fn a_submit_carries_the_command_the_parameters_the_scope_and_the_local_counter() {
+    let msg = ClientMsg::Submit {
+        doc: DOC.to_owned(),
+        local: 3,
+        command: "cell.set".to_owned(),
+        params: json!({"cell": "B2"}),
+        scope: Some("B2".to_owned()),
+    };
+    let (event, body) = emit(&msg);
+    assert_eq!(event, "submit");
+    assert_eq!(body, json!({"local": 3, "command": "cell.set", "params": {"cell": "B2"}, "scope": "B2"}));
+}
+
+#[test]
+fn leaving_carries_no_body() {
+    let (event, body) = emit(&ClientMsg::Leave { doc: DOC.to_owned() });
+    assert_eq!(event, "leave");
+    assert_eq!(body, serde_json::Value::Null);
+}
+
+#[test]
+fn every_event_name_carries_exactly_one_server_message() {
+    // Also the check that EVENTS is complete. A variant whose name is missing
+    // from that list is a message nobody registers a callback for, and the
+    // symptom is a session that connects and then receives nothing.
+    let msgs = vec![
+        joined(0),
+        op(1, "other", None, "B2"),
+        ServerMsg::LockGranted { doc: DOC.to_owned(), scope: "B2".to_owned() },
+        ServerMsg::LockDenied { doc: DOC.to_owned(), scope: "B2".to_owned(), holder: "other".to_owned() },
+        ServerMsg::LockReleased { doc: DOC.to_owned(), scope: "B2".to_owned() },
+        ServerMsg::Presence { doc: DOC.to_owned(), roster: Vec::new() },
+        ServerMsg::Snapshot { doc: DOC.to_owned(), seq: 9, document: json!({}) },
+        ServerMsg::Error { doc: DOC.to_owned(), detail: "refused".to_owned() },
+    ];
+    let mut seen = Vec::new();
+    for msg in msgs {
+        let mut value = serde_json::to_value(&msg).expect("encodes");
+        let tag = value.as_object_mut().expect("an object").remove("t").expect("a tag");
+        let event = tag.as_str().expect("a name").to_owned();
+        assert_eq!(receive(&event, value), Some(msg), "{event} did not survive the round trip");
+        seen.push(event);
+    }
+    seen.sort();
+    let mut listed: Vec<String> = EVENTS.iter().map(|e| (*e).to_owned()).collect();
+    listed.sort();
+    assert_eq!(seen, listed);
+}
+
+#[test]
+fn a_payload_that_is_not_an_object_is_dropped_rather_than_fatal() {
+    assert_eq!(receive("op", json!(7)), None);
+    assert_eq!(receive("op", json!("text")), None);
+    assert_eq!(receive("op", serde_json::Value::Null), None);
+}
+
+#[test]
+fn a_payload_of_the_wrong_shape_for_its_event_is_dropped() {
+    assert_eq!(receive("joined", json!({"doc": DOC})), None);
+}
+
+#[test]
+fn an_event_name_the_protocol_does_not_have_is_dropped() {
+    assert_eq!(receive("nope", json!({"doc": DOC})), None);
 }

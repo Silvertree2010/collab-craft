@@ -9,6 +9,10 @@
 //! to drain messages once per frame rather than be called back on another
 //! thread. So callbacks push into a channel, [`NativeHub::poll`] drains it, and
 //! sends go out through a task that owns the socket.
+//!
+//! The protocol itself is not here. [`emit`] and [`receive`] are the same
+//! functions the browser hub calls, so the two peers cannot drift apart over
+//! an event name.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,12 +22,8 @@ use rust_socketio::{Event, Payload};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::error::{Error, Result};
-use crate::hub::Hub;
+use crate::hub::{EVENTS, Hub, emit, receive};
 use crate::proto::{ClientMsg, ServerMsg};
-
-/// Every event the relay can send. Listed explicitly because `rust_socketio`
-/// registers one callback per event name.
-const EVENTS: [&str; 8] = ["joined", "op", "lock_granted", "lock_denied", "lock_released", "presence", "snapshot", "error"];
 
 /// A connection to the relay from a native app.
 pub struct NativeHub {
@@ -81,7 +81,7 @@ impl NativeHub {
         let flag = connected.clone();
         tokio::spawn(async move {
             while let Some(msg) = out_rx.recv().await {
-                let (event, body) = split(&msg);
+                let (event, body) = emit(&msg);
                 if let Err(e) = client.emit(event, body).await {
                     log::warn!("relay send failed: {e}");
                     flag.store(false, Ordering::Relaxed);
@@ -115,31 +115,7 @@ impl Hub for NativeHub {
     }
 }
 
-/// The event name and body for one client message.
-///
-/// The relay keys handlers on the event name and reads the document from the
-/// peer's token, so the body carries only what the event needs.
-fn split(msg: &ClientMsg) -> (&'static str, serde_json::Value) {
-    match msg {
-        ClientMsg::Join { display, .. } => ("join", serde_json::json!({ "display": display })),
-        ClientMsg::Leave { .. } => ("leave", serde_json::Value::Null),
-        ClientMsg::Submit { local, command, params, scope, .. } => {
-            ("submit", serde_json::json!({ "local": local, "command": command, "params": params, "scope": scope }))
-        }
-        ClientMsg::Lock { scope, .. } => ("lock", serde_json::json!({ "scope": scope })),
-        ClientMsg::Unlock { scope, .. } => ("unlock", serde_json::json!({ "scope": scope })),
-        ClientMsg::Resync { have, .. } => ("resync", serde_json::json!({ "have": have })),
-    }
-}
-
 /// Turn one Socket.IO payload into protocol messages.
-///
-/// **The event name is the discriminator.** `ServerMsg` is a serde-tagged enum
-/// on `t`, and the relay emits a bare body under an event name rather than
-/// repeating the tag inside it. Socket.IO exists to carry that name, so
-/// duplicating it in the payload would be redundant on every message. The tag
-/// is injected here before deserialising, which works because every event name
-/// is exactly the snake_case name of its variant.
 ///
 /// A payload can carry several values, and a malformed one is skipped with a
 /// log line. Dropping a message we cannot read beats tearing down a live
@@ -165,25 +141,5 @@ fn decode_payload(event: &str, payload: Payload) -> Vec<ServerMsg> {
         },
     };
 
-    values.into_iter().filter_map(|v| tag_and_parse(event, v)).collect()
-}
-
-/// Inject the tag, then parse.
-fn tag_and_parse(event: &str, mut value: serde_json::Value) -> Option<ServerMsg> {
-    match value.as_object_mut() {
-        Some(map) => {
-            map.insert("t".to_owned(), serde_json::Value::String(event.to_owned()));
-        }
-        None => {
-            log::warn!("{event} payload was not an object");
-            return None;
-        }
-    }
-    match serde_json::from_value::<ServerMsg>(value) {
-        Ok(msg) => Some(msg),
-        Err(e) => {
-            log::warn!("unreadable {event} message: {e}");
-            None
-        }
-    }
+    values.into_iter().filter_map(|v| receive(event, v)).collect()
 }
