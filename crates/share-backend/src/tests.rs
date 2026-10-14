@@ -119,6 +119,7 @@ fn a_share_reports_both_halves() {
         shared: vec![Share {
             id: "ocs/1".to_owned(),
             target: ShareTarget::User("bob".to_owned()),
+            display: Some("Bob Vickers".to_owned()),
             permission: Permission::Edit,
             url: None,
             note: None,

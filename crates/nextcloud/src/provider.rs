@@ -244,6 +244,9 @@ fn share_from(s: crate::share::Share) -> CloudShare {
     CloudShare {
         id: s.id,
         target,
+        // The server knows what the recipient is called. It says so only
+        // sometimes, and an account id is all there is to fall back on.
+        display: (!s.share_with_name.trim().is_empty()).then(|| s.share_with_name.clone()),
         permission: if s.permissions.contains(Permissions::UPDATE) { Permission::Edit } else { Permission::View },
         url: (!s.url.is_empty()).then_some(s.url),
         note: None,
@@ -583,5 +586,39 @@ impl<H: Http> craft_cloud::Provider for Nextcloud<H> {
             out.push(Capability::Mail);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod share_tests {
+    use super::*;
+
+    fn raw(kind: ShareKind, with: &str, name: &str) -> crate::share::Share {
+        crate::share::Share {
+            id: "42".to_owned(),
+            kind: Some(kind),
+            path: "/Report.xlsx".to_owned(),
+            share_with: with.to_owned(),
+            share_with_name: name.to_owned(),
+            permissions: Permissions::EDIT,
+            url: String::new(),
+            owner: "ada".to_owned(),
+            expires: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_share_keeps_the_name_the_server_put_on_it() {
+        let one = share_from(raw(ShareKind::User, "bob", "Bob Jones"));
+        assert_eq!(one.target, ShareTarget::User("bob".to_owned()));
+        assert_eq!(one.display.as_deref(), Some("Bob Jones"), "a list of account ids tells a reader nothing");
+
+        // Older servers and some share types answer without one.
+        let bare = share_from(raw(ShareKind::User, "bob", ""));
+        assert_eq!(bare.display, None, "an empty name is not a name");
+
+        let group = share_from(raw(ShareKind::Group, "eng", "Engineering"));
+        assert_eq!(group.target, ShareTarget::Group("eng".to_owned()));
+        assert_eq!(group.display.as_deref(), Some("Engineering"));
     }
 }
