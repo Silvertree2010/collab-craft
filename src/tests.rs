@@ -822,6 +822,71 @@ mod web {
         ProviderForm { csrf: csrf.to_owned(), kind: kind.to_owned(), base: base.to_owned(), action: action.to_owned() }
     }
 
+    // ---- entitlement a deployment can change without a redeploy -------------
+
+    #[test]
+    fn a_typed_entitlement_round_trips_through_the_form_and_back() {
+        // What somebody types has to come back as what they typed. A page that
+        // reformats an administrator's text on every save teaches them not to
+        // trust it.
+        let typed = Permissions::parse("gridcraft, wordcraft", "editors: deckcraft, pdfcraft\nreaders: pdfcraft\n");
+        assert_eq!(typed.default_apps(), ["gridcraft".to_owned(), "wordcraft".to_owned()]);
+        assert_eq!(typed.groups_text(), "editors: deckcraft, pdfcraft\nreaders: pdfcraft\n");
+
+        let again = Permissions::parse(&typed.default_apps().join(", "), &typed.groups_text());
+        assert_eq!(again, typed, "a save of what the page showed changes nothing");
+    }
+
+    #[test]
+    fn a_group_line_without_a_colon_grants_that_group_nothing() {
+        // Half a line is a line somebody is still typing. Granting the whole
+        // catalogue to a group because its line was unfinished would be the
+        // worst reading of it.
+        let typed = Permissions::parse("", "editors\n  \n: wordcraft\n");
+        assert_eq!(typed.group_apps().len(), 1, "the nameless line is dropped");
+        assert_eq!(typed.group_apps().get("editors"), Some(&Vec::new()));
+    }
+
+    #[test]
+    fn a_group_name_is_stored_in_one_case_whatever_was_typed() {
+        let typed = Permissions::parse("", "Craft-Editors: wordcraft");
+        assert_eq!(typed.group_apps().keys().collect::<Vec<_>>(), vec!["craft-editors"]);
+        assert_eq!(typed.apps_for_session(&signed_in(&["CRAFT-EDITORS"])), vec!["wordcraft".to_owned()]);
+    }
+
+    #[test]
+    fn the_page_names_what_is_granted_and_not_deployed() {
+        // The one mistake whose only symptom is a card that never appears.
+        // Both halves have to be right, and only this page sees both.
+        let entitled = Permissions::parse("gridcraft, figcraft", "editors: wordcraft, soundcraft");
+        let app = service(Permissions::decide("", &[]), env_provider("https://cloud.example.com"), &["gridcraft", "wordcraft"]);
+        assert_eq!(pages::granted_but_absent(&app, &entitled), vec!["figcraft".to_owned(), "soundcraft".to_owned()]);
+
+        let all_there = Permissions::parse("gridcraft", "editors: wordcraft");
+        assert!(pages::granted_but_absent(&app, &all_there).is_empty(), "nothing to warn about");
+    }
+
+    #[test]
+    fn an_entitlement_nobody_stored_is_the_one_the_environment_named() {
+        // The store is unreachable in a test, which is the same answer as a
+        // deployment that never visited the page. Both leave the environment
+        // in charge, and neither is an error.
+        let app = service(Permissions::decide("gridcraft", &[]), env_provider("https://cloud.example.com"), &["gridcraft"]);
+        let (entitled, source) = futures_lite_block_on(app.entitlements());
+        assert_eq!(entitled.default_apps(), ["gridcraft".to_owned()]);
+        assert_eq!(source, crate::settings::Source::Environment);
+    }
+
+    /// Runs one future to completion on this thread.
+    ///
+    /// The entitlement read is async because it may reach the bus. Everything
+    /// it is asserted about here is the fallback, which touches nothing.
+    fn futures_lite_block_on<F: std::future::Future>(f: F) -> F::Output {
+        // Timers on, because the bus client arms one before it gives up on a
+        // connection nobody is listening for.
+        tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime").block_on(f)
+    }
+
     // ---- what the launcher may draw -----------------------------------------
 
     #[test]
@@ -829,13 +894,13 @@ mod web {
         // An entitlement to an application nobody deployed opens nothing. A
         // card for it would be a tile over a 404.
         let app = service(Permissions::decide("gridcraft,wordcraft", &[]), env_provider("https://cloud.example.com"), &["gridcraft"]);
-        assert_eq!(app.launchable(&signed_in(&[])), vec!["gridcraft".to_owned()]);
+        assert_eq!(app.launchable(&app.permissions, &signed_in(&[])), vec!["gridcraft".to_owned()]);
     }
 
     #[test]
     fn an_application_nobody_is_entitled_to_draws_no_card() {
         let app = service(Permissions::decide("gridcraft", &[]), env_provider("https://cloud.example.com"), &["gridcraft", "pdfcraft"]);
-        let launchable = app.launchable(&signed_in(&[]));
+        let launchable = app.launchable(&app.permissions, &signed_in(&[]));
         assert_eq!(launchable, vec!["gridcraft".to_owned()]);
         assert!(!launchable.contains(&"pdfcraft".to_owned()), "hosting an application is not granting it");
     }
@@ -844,9 +909,9 @@ mod web {
     fn a_group_adds_to_what_the_default_grants() {
         let permissions = Permissions::decide("gridcraft", &[("editors", "wordcraft,deckcraft")]);
         let app = service(permissions, env_provider("https://cloud.example.com"), &["gridcraft", "wordcraft", "deckcraft"]);
-        assert_eq!(app.launchable(&signed_in(&[])), vec!["gridcraft".to_owned()]);
+        assert_eq!(app.launchable(&app.permissions, &signed_in(&[])), vec!["gridcraft".to_owned()]);
         assert_eq!(
-            app.launchable(&signed_in(&["editors"])),
+            app.launchable(&app.permissions, &signed_in(&["editors"])),
             vec!["deckcraft".to_owned(), "gridcraft".to_owned(), "wordcraft".to_owned()],
             "membership of one group is the whole of granting the rest"
         );
@@ -857,7 +922,7 @@ mod web {
         let permissions = Permissions::decide("", &[("Craft-Editors", "wordcraft")]);
         let app = service(permissions, env_provider("https://cloud.example.com"), &["wordcraft"]);
         for reported in ["craft-editors", "Craft-Editors", "CRAFT-EDITORS"] {
-            assert_eq!(app.launchable(&signed_in(&[reported])), vec!["wordcraft".to_owned()], "{reported} is the same group");
+            assert_eq!(app.launchable(&app.permissions, &signed_in(&[reported])), vec!["wordcraft".to_owned()], "{reported} is the same group");
         }
     }
 
@@ -865,14 +930,14 @@ mod web {
     fn a_recipient_may_launch_only_the_application_their_link_names() {
         let hosted = ["gridcraft", "wordcraft"];
         let app = service(Permissions::decide("gridcraft,wordcraft", &[]), env_provider("https://cloud.example.com"), &hosted);
-        assert_eq!(app.launchable(&recipient("gridcraft")), vec!["gridcraft".to_owned()]);
-        assert_eq!(app.launchable(&recipient("wordcraft")), vec!["wordcraft".to_owned()]);
+        assert_eq!(app.launchable(&app.permissions, &recipient("gridcraft")), vec!["gridcraft".to_owned()]);
+        assert_eq!(app.launchable(&app.permissions, &recipient("wordcraft")), vec!["wordcraft".to_owned()]);
     }
 
     #[test]
     fn a_recipient_sent_into_an_application_nobody_hosts_may_launch_nothing() {
         let app = service(Permissions::decide("gridcraft", &[]), env_provider("https://cloud.example.com"), &["gridcraft"]);
-        assert!(app.launchable(&recipient("cadcraft")).is_empty());
+        assert!(app.launchable(&app.permissions, &recipient("cadcraft")).is_empty());
     }
 
     // ---- who may configure the provider -------------------------------------

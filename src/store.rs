@@ -243,6 +243,31 @@ impl Store {
         let Some(mut c) = self.conn().await else { return false };
         c.del::<_, ()>(self.provider_config_key()).await.is_ok()
     }
+
+    fn entitlements_key(&self) -> String {
+        format!("{}:config:apps", self.prefix)
+    }
+
+    /// Who may open which app, where a deployment has said so on the setup
+    /// page. Absent until somebody does, which leaves the environment in
+    /// charge.
+    pub async fn entitlements(&self) -> Option<crate::state::Permissions> {
+        let mut c = self.conn().await?;
+        let body: String = c.get(self.entitlements_key()).await.ok()?;
+        serde_json::from_str(&body).ok()
+    }
+
+    pub async fn put_entitlements(&self, apps: &crate::state::Permissions) -> bool {
+        let Some(mut c) = self.conn().await else { return false };
+        let Ok(body) = serde_json::to_string(apps) else { return false };
+        c.set::<_, _, ()>(self.entitlements_key(), body).await.is_ok()
+    }
+
+    /// Forget them, which puts entitlement back on the environment.
+    pub async fn drop_entitlements(&self) -> bool {
+        let Some(mut c) = self.conn().await else { return false };
+        c.del::<_, ()>(self.entitlements_key()).await.is_ok()
+    }
 }
 
 /// Keyed links, for a recipient with no account.

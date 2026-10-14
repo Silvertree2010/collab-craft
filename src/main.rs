@@ -257,7 +257,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/account/link/finish", axum::routing::post(pages::link_finish))
         .route("/account/unlink", axum::routing::post(pages::unlink))
         .route("/account/signout", axum::routing::post(pages::signout))
-        .route("/settings/provider", axum::routing::get(pages::provider).post(pages::provider_save));
+        .route("/settings/provider", axum::routing::get(pages::provider).post(pages::provider_save))
+        .route("/settings/apps", axum::routing::get(pages::apps).post(pages::apps_save));
 
     // with_state goes last, after every route including the fallback.
     // Applying it earlier leaves the fallback still wanting state, and the
