@@ -15,7 +15,8 @@ craft-cloud = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-# Blocking, because the apps calling this are not async.
+
+# The desktop transport. Blocking, because the apps calling this are not async.
 #
 # platform-verifier, because a CollabCraft behind an internally signed
 # certificate is the normal case and ureq defaults to Mozilla's roots only.
@@ -26,4 +27,29 @@ thiserror = { workspace = true }
 #
 # Enabling the native-tls feature alone would not have helped: the provider
 # still has to be selected, and it defaults to rustls either way.
-ureq = { version = "3", features = ["json", "platform-verifier"] }
+#
+# Gated on the target and never on a feature. ureq reaches getrandom 0.2, which
+# refuses to compile for wasm32-unknown-unknown at all, and a feature flag
+# leaves the dependency in the graph of every build that resolves the manifest.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "3", features = ["platform-verifier"] }
+
+# The browser transport. The page's own fetch, through the bindings the browser
+# already has. No certificate store and no root list here: the browser settled
+# which certificates it trusts before the page loaded.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+web-sys = { workspace = true, features = [
+  "AbortController",
+  "AbortSignal",
+  "Document",
+  "Element",
+  "Headers",
+  "Request",
+  "RequestCredentials",
+  "RequestInit",
+  "Response",
+  "Window",
+] }
