@@ -1,45 +1,22 @@
-//! Landing on a keyed link, in a browser.
+//! The half of the landing flow that needs a browser.
 //!
-//! Somebody with no account followed a link in their mail. The service
-//! redeemed the key, spent one use and set a guest session cookie, then sent
-//! the browser to one of the twelve app builds. This module is what that build
-//! asks on startup, and it answers one of three things: this is an ordinary
-//! visit, this is a keyed link that opened, or this is a keyed link the
-//! service refused and here is the sentence to show.
+//! The three calls, the relay socket and the page a refused recipient reads.
+//! The judgement about which failures mean what is [`super::verdict`], which
+//! is a pure function and tested on every target.
 //!
-//! # Why it lives here and not in the interface crate
-//!
-//! The flow is three calls to this service and one socket. Nothing in it
-//! draws. [`Client`] already has the three calls and [`craft_collab`] already
-//! has the socket, so putting the flow beside them leaves an application with
-//! nothing to restate: no route, no cookie, no status code, no version
-//! tracking and no ordering.
-//!
-//! A refusal also has to be readable before any canvas exists. An application
-//! that never started has drawn nothing, so the one page a recipient must
-//! never miss cannot be drawn by the application's own interface layer.
-//! [`refuse`] writes it into the document instead.
-//!
-//! # What an application still owns
-//!
-//! Turning bytes into one of its own documents, and pumping its own relay
-//! session. Both need the application's document model, and no library can
-//! hold that.
+//! Nothing here holds a credential. A recipient never has one. The session is
+//! a cookie this service set, the browser attaches it, and the service reads
+//! the document as the sharer. So every call below is made same-origin: a
+//! cookie does not cross an origin, and a client pointed anywhere else would
+//! be a client with no session.
 //!
 //! # The order matters
 //!
 //! The token comes first, because its answer says whether any of this applies
 //! and carries the permission, the name and the version. The bytes come
-//! second, because an application that has them must be able to open them. The
-//! relay comes last, through [`Invitation::join`], because a document nobody
-//! can see is not improved by being shared live.
-//!
-//! # Nothing here holds a credential
-//!
-//! A recipient never has one. The session is a cookie this service set, the
-//! browser attaches it, and the service reads the document as the sharer. So
-//! every call below is made same-origin: a cookie does not cross an origin,
-//! and a client pointed anywhere else would be a client with no session.
+//! second, because an application that has them can open them. The relay comes
+//! last, through [`Invitation::join`], because a document nobody can see is
+//! not improved by being shared live.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -48,25 +25,8 @@ use craft_cloud::{Entry, Permission};
 use craft_collab::web::WebHub;
 use wasm_bindgen::JsCast;
 
-use crate::{Client, Error, InviteJoin, Result};
-
-/// The code the service refuses a key with. See its `recipient::refuse_json`.
-///
-/// The one answer that means "this browser followed a keyed link and the link
-/// is no good". Every other failure means something else, which is why the
-/// code is matched rather than the status.
-const LINK_INVALID: &str = "link_invalid";
-
-/// What the landing page puts on the query when it hands a browser to an app
-/// build. See the service's `recipient::handoff`.
-///
-/// It proves nothing and grants nothing. The cookie is the whole of the
-/// authority. This only says that a keyed link is why this page was loaded, so
-/// a service that cannot be reached is reported to the recipient instead of
-/// being mistaken for an ordinary visit. Without it a network blip would show
-/// somebody an empty document and no reason, which is the one outcome worse
-/// than a plain refusal.
-const MARKER: &str = "invite";
+use super::{Verdict, sentence, verdict};
+use crate::{Client, InviteJoin, Result};
 
 /// What this page load turned out to be.
 pub enum Arrival {
@@ -157,8 +117,6 @@ impl Invitation {
 #[derive(Clone)]
 pub struct Saver {
     client: Client,
-    /// The version the next save is conditional on. The service answers each
-    /// save with the version it wrote, and that becomes this.
     etag: Rc<RefCell<Option<String>>>,
 }
 
@@ -213,7 +171,12 @@ pub async fn arrive_through(client: Client) -> Arrival {
     let followed = followed_a_link();
     let join = match client.invite_token().await {
         Ok(join) => join,
-        Err(e) => return not_a_link(e, followed),
+        Err(e) => {
+            return match verdict(&e, followed) {
+                Verdict::Ordinary => Arrival::Ordinary,
+                Verdict::Refused(reason) => Arrival::Refused(reason),
+            };
+        }
     };
     // The token said yes, so this is a keyed link and every later failure is
     // the recipient's to read. Carrying on as an ordinary visit from here
@@ -232,60 +195,16 @@ pub async fn arrive_through(client: Client) -> Arrival {
     }
 }
 
-/// What a failed token call means.
-///
-/// The service answers a dead key with its own code, and that is a refusal
-/// whoever followed the link has to read. Anything else is somebody who is not
-/// a recipient: no session at all, or a signed-in account, which has the
-/// ordinary routes instead. Those are ordinary visits and nothing is said
-/// about them.
-///
-/// `followed` flips the unknown cases. A browser the landing page sent here is
-/// known to be a recipient, so a service that cannot be reached is reported
-/// rather than passed over in silence.
-fn not_a_link(error: Error, followed: bool) -> Arrival {
-    match &error {
-        Error::Refused { code, detail } if code == LINK_INVALID => Arrival::Refused(public(detail)),
-        _ if followed => Arrival::Refused(sentence(&error)),
-        _ => Arrival::Ordinary,
-    }
-}
-
-/// What a recipient is told when the service gave no sentence of its own.
-const UNEXPLAINED: &str = "this link no longer works. Ask whoever sent it to share the document again";
-
-fn public(detail: &str) -> String {
-    let trimmed = detail.trim();
-    if trimmed.is_empty() { UNEXPLAINED.to_owned() } else { trimmed.to_owned() }
-}
-
-/// One failure as a sentence for a person to read.
-///
-/// A recipient can act on one thing only, which is asking whoever sent the
-/// link to send another. An unreachable service is worth telling apart,
-/// because that one is worth trying again.
-fn sentence(error: &Error) -> String {
-    match error {
-        Error::Refused { code, detail } if code == LINK_INVALID => public(detail),
-        Error::Unreachable(detail) => format!("This service could not be reached. {detail}"),
-        Error::Refused { detail, .. } => public(detail),
-        _ => UNEXPLAINED.to_owned(),
-    }
-}
-
 /// Whether the landing page is what sent this browser here.
 ///
-/// Read off the query. `false` on a reload or a bookmark, which is why it only
-/// ever widens what is reported and never decides whether a link is good. The
-/// cookie decides that, and only the service can read it.
+/// `false` on a reload or a bookmark, which is why it only ever widens what is
+/// reported and never decides whether a link is good. The cookie decides that,
+/// and only the service can read it.
 fn followed_a_link() -> bool {
-    let Some(search) = web_sys::window().and_then(|w| w.location().search().ok()) else {
-        return false;
-    };
-    search.trim_start_matches('?').split('&').any(|pair| {
-        let name = pair.split('=').next().unwrap_or_default();
-        name == MARKER
-    })
+    match web_sys::window().and_then(|w| w.location().search().ok()) {
+        Some(search) => super::followed_a_link(&search),
+        None => false,
+    }
 }
 
 /// Show a recipient why their link did not work.
@@ -306,8 +225,8 @@ pub fn refuse(reason: &str) {
 /// The heading, the same words the service's own refusal page uses.
 ///
 /// A recipient refused at the landing page and one refused a moment later, in
-/// the app build, are the same person reading the same sentence. Two
-/// different pages would read as two different faults.
+/// the app build, are the same person reading the same sentence. Two different
+/// pages would read as two different faults.
 const HEADING: &str = "This link does not work";
 
 fn write_refusal(reason: &str) -> std::result::Result<(), String> {

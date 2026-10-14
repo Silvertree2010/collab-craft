@@ -42,9 +42,10 @@ mod web;
 /// Landing on a keyed link: the whole of what a browser build does when
 /// somebody with no account follows a share.
 ///
-/// Browser only. A desktop app is handed its session by the landing page's own
-/// scheme URL and never follows this path.
-#[cfg(target_arch = "wasm32")]
+/// The flow itself is browser only. A desktop app is handed its session by the
+/// landing page's own scheme URL and never follows this path. The judgement
+/// inside it is a pure function and compiles everywhere, so the decision that
+/// tells a dead link from an ordinary visit can be tested without a browser.
 pub mod invite;
 
 #[cfg(not(target_arch = "wasm32"))]
