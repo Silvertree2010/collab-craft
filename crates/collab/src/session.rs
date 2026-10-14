@@ -66,6 +66,14 @@ pub struct Session {
 }
 
 impl Session {
+    /// This session's own peer, once the relay has said who it is.
+    ///
+    /// A roster arrives with everybody in it, including the reader. A
+    /// control showing who else is here has to drop itself from that list,
+    /// and it cannot do so without knowing which one it is.
+    pub fn me(&self) -> Option<&PeerId> {
+        self.me.as_ref()
+    }
     pub fn new(doc: impl Into<DocId>) -> Session {
         Session {
             doc: doc.into(),
