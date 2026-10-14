@@ -154,6 +154,7 @@ Built. The service renders its own pages out of the one binary.
 | `/` | the applications this signed-in user may open |
 | `/account` | who they are, whether storage is linked, what they may open |
 | `/settings/provider` | which cloud this deployment uses |
+| `/settings/apps` | what it hosts, and who may open each one |
 
 No framework, no build step, no external asset. The launcher takes over from a
 hand-written `index.html` in the web root. That file published an internal
@@ -163,6 +164,12 @@ The cloud provider is configurable from a browser now. The environment stays
 the default. A value saved on the page overrides it. Membership of a group
 named by `COLLABCRAFT_ADMIN_GROUPS` is the whole of the permission to change
 it. Saving tests the address first.
+
+Entitlement works the same way. A deployment grants an application to a group
+from a browser. Nobody waits for a redeploy and nobody loses a session. The
+page lists what this deployment hosts beside what it grants. It names anything
+granted that nobody deployed. That is the one mistake whose only symptom is a
+card that never appears.
 
 What is still owed here is the share dialog's own web surface. A browser build
 carrying `craft-ui::share` is the piece that makes sharing reachable without a
