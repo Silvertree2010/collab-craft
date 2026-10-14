@@ -18,6 +18,7 @@ use crate::transport::ReqwestHttp;
 /// Configuration is a map of group name to app list, plus a default applied to
 /// everyone who signs in. Groups arrive from the identity provider, so adding
 /// somebody to a group in Authentik is the whole of granting access.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Permissions {
     default: Vec<String>,
     by_group: BTreeMap<String, Vec<String>>,
@@ -73,6 +74,43 @@ impl Permissions {
 
     pub fn may_open(&self, session: &Session, app: &str) -> bool {
         self.apps_for_session(session).iter().any(|a| a == app)
+    }
+
+    /// What everyone who signs in may open.
+    pub fn default_apps(&self) -> &[String] {
+        &self.default
+    }
+
+    /// What each named group adds on top, by group name in lower case.
+    pub fn group_apps(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.by_group
+    }
+
+    /// Build one from values a person typed on the setup page.
+    ///
+    /// The group half arrives as one line per group, `group: app, app`. A
+    /// repeating pair of fields would need script to add a row, and this page
+    /// works without any.
+    pub fn parse(default: &str, groups: &str) -> Permissions {
+        let mut by_group = BTreeMap::new();
+        for line in groups.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (group, apps) = line.split_once(':').unwrap_or((line, ""));
+            let group = group.trim().to_ascii_lowercase();
+            if group.is_empty() {
+                continue;
+            }
+            by_group.insert(group, split(apps));
+        }
+        Permissions { default: split(default), by_group }
+    }
+
+    /// The group half, as the setup page's textarea wants it back.
+    pub fn groups_text(&self) -> String {
+        self.by_group.iter().map(|(group, apps)| format!("{group}: {}\n", apps.join(", "))).collect()
     }
 }
 
@@ -135,8 +173,12 @@ impl App {
     /// needed: an entitlement to an app nobody deployed opens nothing, and a
     /// hosted app nobody is entitled to is a 403. The launcher draws from
     /// this, so a card that cannot work never appears.
-    pub fn launchable(&self, session: &Session) -> Vec<String> {
-        self.permissions.apps_for_session(session).into_iter().filter(|name| self.is_app(name)).collect()
+    ///
+    /// Takes the entitlement it should use. A caller that read it once for the
+    /// request passes the same value everywhere on the page, and a page asking
+    /// twice cannot answer itself differently halfway down.
+    pub fn launchable(&self, entitled: &Permissions, session: &Session) -> Vec<String> {
+        entitled.apps_for_session(session).into_iter().filter(|name| self.is_app(name)).collect()
     }
 
     /// Which provider this deployment uses, and where that came from.
@@ -147,6 +189,23 @@ impl App {
     /// change. A session is already read from the same bus on every request.
     pub async fn provider_config(&self) -> Option<(crate::settings::ProviderConfig, crate::settings::Source)> {
         self.settings.resolve(self.store.provider_config().await)
+    }
+
+    /// Who may open which app, and where that answer came from.
+    ///
+    /// The environment is the default and the setup page can override it. The
+    /// same arrangement as the provider address, for the same reason. An
+    /// administrator granting an app to a group should not need a redeploy,
+    /// and a deployment that never visits the page keeps behaving exactly as
+    /// its environment says.
+    ///
+    /// Read per request rather than cached. Entitlement decides what a person
+    /// may open, so a change has to take effect for everybody at once.
+    pub async fn entitlements(&self) -> (Permissions, crate::settings::Source) {
+        match self.store.entitlements().await {
+            Some(stored) => (stored, crate::settings::Source::Stored),
+            None => (self.permissions.clone(), crate::settings::Source::Environment),
+        }
     }
 
     /// What this deployment itself offers, beyond what the provider offers.

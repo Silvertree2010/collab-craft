@@ -28,7 +28,7 @@ use craft_cloud::{Permission, Provider, ShareTarget};
 use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
-use crate::state::App;
+use crate::state::{App, Permissions};
 
 type Shared = Arc<dyn Provider + Send + Sync>;
 
@@ -113,7 +113,7 @@ pub struct Me {
 }
 
 pub async fn me(State(app): State<Arc<App>>, session: Session) -> Response {
-    let apps = app.permissions.apps_for_session(&session);
+    let apps = app.entitlements().await.0.apps_for_session(&session);
     let service = app.service_capabilities();
     let Some(provider) = app.provider_for(&session).await else {
         return Json(Me {
@@ -343,7 +343,7 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, Json(req): Jso
     // Where a recipient with no account would land. Settled before anything is
     // shared, because a key with nowhere to go is worse than no key, and a
     // sharer told now can do something about it.
-    let landing = landing_app(&app, &session, req.app.as_deref());
+    let landing = landing_app(&app, &app.entitlements().await.0, &session, req.app.as_deref());
     let mint = app.keyed.enabled() && landing.is_some();
 
     let req = Arc::new(req);
@@ -428,9 +428,9 @@ pub async fn share(State(app): State<Arc<App>>, session: Session, Json(req): Jso
 /// no app, or it named one this deployment does not host, or it named one the
 /// sharer may not open. The last is the one that matters: nobody may hand a
 /// recipient a build they could not open themselves.
-fn landing_app(app: &App, session: &Session, named: Option<&str>) -> Option<String> {
+fn landing_app(app: &App, entitled: &Permissions, session: &Session, named: Option<&str>) -> Option<String> {
     let name = named?.trim();
-    if !app.is_app(name) || !app.permissions.may_open(session, name) {
+    if !app.is_app(name) || !entitled.may_open(session, name) {
         return None;
     }
     Some(name.to_owned())
@@ -644,7 +644,7 @@ pub async fn web(State(app): State<Arc<App>>, session: Option<Session>, req: axu
             // visitor has not been denied anything yet.
             return axum::response::Redirect::temporary("/auth/login").into_response();
         };
-        if !app.permissions.may_open(&session, &first) {
+        if !app.entitlements().await.0.may_open(&session, &first) {
             return (StatusCode::FORBIDDEN, Json(ApiError { code: "app_not_permitted", detail: format!("you do not have access to {first}") }))
                 .into_response();
         }
@@ -664,7 +664,7 @@ pub async fn web(State(app): State<Arc<App>>, session: Option<Session>, req: axu
 
 /// Which apps this user may open.
 pub async fn apps(State(app): State<Arc<App>>, session: Session) -> Response {
-    Json(app.permissions.apps_for_session(&session)).into_response()
+    Json(app.entitlements().await.0.apps_for_session(&session)).into_response()
 }
 
 /// How long a static asset may be cached.

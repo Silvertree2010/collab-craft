@@ -35,7 +35,7 @@ use sha2::Sha256;
 
 use crate::session::{COOKIE, GUEST_COOKIE, Session, random_id};
 use crate::settings::{ProviderConfig, Source};
-use crate::state::App;
+use crate::state::{App, Permissions};
 
 // ---- the shared layout ----------------------------------------------------
 
@@ -154,7 +154,7 @@ pub async fn launcher(State(app): State<Arc<App>>, session: Option<Session>) -> 
         return Html(layout("Welcome", None, &welcome(&app))).into_response();
     };
 
-    let apps = app.launchable(&session);
+    let apps = app.launchable(&app.entitlements().await.0, &session);
     let linked = storage_linked(&app, &session).await;
     let mut body = String::new();
 
@@ -177,7 +177,7 @@ pub async fn launcher(State(app): State<Arc<App>>, session: Option<Session>) -> 
              Ask whoever runs it to grant one. Access here is granted by group membership at the identity provider.</p>",
         );
         if app.settings.may_configure(&session) {
-            body.push_str("<div class=\"row\"><a class=\"btn quiet\" href=\"/settings/provider\">Cloud provider</a></div>");
+            body.push_str("<div class=\"row\"><a class=\"btn quiet\" href=\"/settings/provider\">Cloud provider</a><a class=\"btn quiet\" href=\"/settings/apps\">Applications</a></div>");
         }
         body.push_str("</section>");
     } else {
@@ -194,7 +194,7 @@ pub async fn launcher(State(app): State<Arc<App>>, session: Option<Session>) -> 
         body.push_str(&format!("<dt>Applications</dt><dd>{} available to you</dd>", apps.len()));
         body.push_str("</dl><div class=\"row\"><a class=\"btn quiet\" href=\"/account\">Your account</a>");
         if app.settings.may_configure(&session) {
-            body.push_str("<a class=\"btn quiet\" href=\"/settings/provider\">Cloud provider</a>");
+            body.push_str("<a class=\"btn quiet\" href=\"/settings/provider\">Cloud provider</a><a class=\"btn quiet\" href=\"/settings/apps\">Applications</a>");
         }
         body.push_str("</div></section>");
     }
@@ -354,7 +354,7 @@ pub async fn account(State(app): State<Arc<App>>, session: Option<Session>, Quer
             "<h1>Shared with you</h1><p class=\"lede\">You are here through a shared link. \
              There is no account on this deployment to manage. The link opens one document.</p>",
         );
-        let apps = app.launchable(&session);
+        let apps = app.launchable(&app.entitlements().await.0, &session);
         if !apps.is_empty() {
             body.push_str("<ul class=\"grid\">");
             for slug in &apps {
@@ -368,7 +368,7 @@ pub async fn account(State(app): State<Arc<App>>, session: Option<Session>, Quer
     let token = csrf(&app.secret, &session.user);
     let provider = app.provider_config().await;
     let linked = linked_account(&app, &session).await;
-    let apps = app.launchable(&session);
+    let apps = app.launchable(&app.entitlements().await.0, &session);
     let mut body = String::new();
 
     if let Some(strip) = q.strip() {
@@ -472,7 +472,7 @@ pub async fn account(State(app): State<Arc<App>>, session: Option<Session>, Quer
     if app.settings.may_configure(&session) {
         body.push_str(
             "<h2>This deployment</h2><section class=\"panel\"><p>You may change the cloud provider for everybody here.</p>\
-             <div class=\"row\"><a class=\"btn quiet\" href=\"/settings/provider\">Cloud provider</a></div></section>",
+             <div class=\"row\"><a class=\"btn quiet\" href=\"/settings/provider\">Cloud provider</a><a class=\"btn quiet\" href=\"/settings/apps\">Applications</a></div></section>",
         );
     }
 
@@ -668,6 +668,8 @@ impl Flash {
             "link_failed" => ("bad", "The provider would not finish linking. Try again."),
             "provider_saved" => ("good", "The provider answered and the address is saved. It is in use now."),
             "provider_cleared" => ("good", "The stored address is gone. This deployment is back on its environment default."),
+            "apps_saved" => ("good", "Saved. Everybody signing in from now on gets this."),
+            "apps_cleared" => ("good", "The stored entitlement is gone. This deployment is back on its environment default."),
             _ => return None,
         };
         Some(format!("<p class=\"strip {tone}\">{message}</p>"))
@@ -760,6 +762,156 @@ pub async fn provider_save(State(app): State<Arc<App>>, session: Session, Form(f
     // decides where every user's documents come from.
     tracing::info!(by = %session.user, kind = %typed.kind, base = %typed.base, "the cloud provider was changed");
     Redirect::to("/settings/provider?said=provider_saved").into_response()
+}
+
+/// The entitlement setup form.
+#[derive(Deserialize)]
+pub struct AppsForm {
+    #[serde(default)]
+    pub csrf: String,
+    /// Comma separated, what everybody who signs in may open.
+    #[serde(default)]
+    pub default: String,
+    /// One line per group, `group: app, app`.
+    #[serde(default)]
+    pub groups: String,
+    /// `save` or `clear`.
+    #[serde(default)]
+    pub action: String,
+}
+
+/// Where a deployment says who may open which application.
+///
+/// Gated on the same group as the provider page. Entitlement decides what
+/// every user sees, so it belongs to whoever decides where the documents live.
+pub async fn apps(State(app): State<Arc<App>>, session: Option<Session>, Query(q): Query<Flash>) -> Response {
+    let Some(session) = session else {
+        return Redirect::to("/auth/login").into_response();
+    };
+    if !app.settings.may_configure(&session) {
+        return refuse_configure(&app, &session);
+    }
+    let (entitled, source) = app.entitlements().await;
+    let body = apps_body(&app, &session, &entitled, source, q.strip().as_deref(), None);
+    Html(layout("Applications", Some(&session), &body)).into_response()
+}
+
+/// Save an entitlement, or go back to the environment default.
+pub async fn apps_save(State(app): State<Arc<App>>, session: Session, Form(form): Form<AppsForm>) -> Response {
+    if !app.settings.may_configure(&session) {
+        return refuse_configure(&app, &session);
+    }
+    if !csrf_ok(&app.secret, &session.user, &form.csrf) {
+        return stale(&session);
+    }
+
+    if form.action == "clear" {
+        if !app.store.drop_entitlements().await {
+            let (entitled, source) = app.entitlements().await;
+            let strip = String::from("<p class=\"strip bad\">This service could not drop the stored entitlement. The bus is unreachable.</p>");
+            let body = apps_body(&app, &session, &entitled, source, Some(&strip), None);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Html(layout("Applications", Some(&session), &body))).into_response();
+        }
+        tracing::info!(by = %session.user, "the stored entitlement was cleared");
+        return Redirect::to("/settings/apps?said=apps_cleared").into_response();
+    }
+
+    let typed = Permissions::parse(&form.default, &form.groups);
+    if !app.store.put_entitlements(&typed).await {
+        let strip = String::from("<p class=\"strip bad\">This service could not store that. The bus is unreachable.</p>");
+        let body = apps_body(&app, &session, &typed, Source::Stored, Some(&strip), Some(&form));
+        return (StatusCode::INTERNAL_SERVER_ERROR, Html(layout("Applications", Some(&session), &body))).into_response();
+    }
+    // Who changed it, because this decides what every user may open.
+    tracing::info!(by = %session.user, default = %form.default.trim(), "entitlement was changed");
+    Redirect::to("/settings/apps?said=apps_saved").into_response()
+}
+
+/// The entitlement page's body.
+///
+/// Names what this deployment hosts beside the entitlement, because the two
+/// together are what a person actually gets. An entitlement to something
+/// nobody deployed grants nothing. Seeing that beats wondering why a card
+/// never appeared.
+pub fn apps_body(app: &App, session: &Session, entitled: &Permissions, source: Source, strip: Option<&str>, typed: Option<&AppsForm>) -> String {
+    let token = csrf(&app.secret, &session.user);
+    let mut body = String::new();
+    if let Some(strip) = strip {
+        body.push_str(strip);
+    }
+    body.push_str(
+        "<h1>Applications</h1><p class=\"lede\">Who may open what. Everybody who signs in gets the default. \
+         A group from the identity provider adds to it.</p>",
+    );
+
+    let tag = match source {
+        Source::Stored => "set on this page",
+        Source::Environment => "from the environment",
+    };
+    body.push_str(&format!(
+        "<section class=\"panel\"><dl class=\"facts\"><dt>In use</dt><dd><span class=\"tag\">{tag}</span></dd>\
+         <dt>Hosted here</dt><dd>{}</dd></dl>",
+        if app.hosted.is_empty() { "nothing".to_owned() } else { escape(&sorted(&app.hosted).join(", ")) }
+    ));
+
+    // Anything granted that nobody deployed. Worth saying out loud. It is the
+    // one mistake whose only symptom is a card that never appears.
+    let missing = granted_but_absent(app, entitled);
+    if !missing.is_empty() {
+        body.push_str(&format!("<p class=\"hint\">Granted here and not deployed, so nobody can open it: {}.</p>", escape(&missing.join(", "))));
+    }
+    body.push_str("</section>");
+
+    let default = match typed {
+        Some(form) => form.default.clone(),
+        None => entitled.default_apps().join(", "),
+    };
+    let groups = match typed {
+        Some(form) => form.groups.clone(),
+        None => entitled.groups_text(),
+    };
+    body.push_str(&format!(
+        "<h2>Change it</h2><section class=\"panel\"><form method=\"post\" action=\"/settings/apps\">{}\
+         <label for=\"default\">Everybody who signs in</label>\
+         <input id=\"default\" name=\"default\" value=\"{}\" placeholder=\"gridcraft, wordcraft\">\
+         <p class=\"hint\">Comma separated. Leave it empty to grant nothing by default.</p>\
+         <label for=\"groups\">By group</label>\
+         <textarea id=\"groups\" name=\"groups\" rows=\"5\" placeholder=\"editors: wordcraft, deckcraft\">{}</textarea>\
+         <p class=\"hint\">One line per group, as <code>group: app, app</code>. A group name matches whatever case \
+         the identity provider reports.</p>\
+         <div class=\"row\"><button class=\"btn\" type=\"submit\" name=\"action\" value=\"save\">Save</button></div></form></section>",
+        hidden_csrf(&token),
+        escape(&default),
+        escape(&groups)
+    ));
+
+    if source == Source::Stored {
+        body.push_str(&format!(
+            "<h2>Back to the default</h2><section class=\"panel\"><p>Dropping the stored entitlement puts this \
+             deployment back on whatever its environment names.</p>\
+             <form method=\"post\" action=\"/settings/apps\">{}\
+             <div class=\"row\"><button class=\"btn risky\" type=\"submit\" name=\"action\" value=\"clear\">Drop the stored entitlement</button>\
+             </div></form></section>",
+            hidden_csrf(&token)
+        ));
+    }
+    body.push_str("<div class=\"row\"><a class=\"btn quiet\" href=\"/account\">Back to your account</a></div>");
+    body
+}
+
+/// Every application granted somewhere that this deployment does not host.
+pub fn granted_but_absent(app: &App, entitled: &Permissions) -> Vec<String> {
+    let mut out: Vec<String> =
+        entitled.default_apps().iter().chain(entitled.group_apps().values().flatten()).filter(|name| !app.is_app(name)).cloned().collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn sorted(names: &[String]) -> Vec<String> {
+    let mut out = names.to_vec();
+    out.sort();
+    out
 }
 
 /// The setup page's body.
