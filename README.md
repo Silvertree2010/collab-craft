@@ -143,6 +143,16 @@ app that opens the one document they were sent.
 A client is never asked whether it may run. A client asking itself is no check
 at all.
 
+`/settings/apps` changes all of that without a redeploy. A stored entitlement
+overrides the environment, the same way a stored provider address does. The
+page is gated on `COLLABCRAFT_ADMIN_GROUPS`. The people who decide where
+documents live are the people who decide who may open them. Dropping the stored
+record puts the deployment back on whatever its environment names.
+
+The page lists what this deployment hosts beside what it grants. It names
+anything granted that nobody deployed. That combination is the one mistake
+whose only symptom is a card that never appears.
+
 ## Sharing with somebody who has no account
 
 A share aimed at an address the provider holds no account for produces a link
