@@ -96,6 +96,10 @@ pub struct Invitation {
     pub permission: Permission,
     join: InviteJoin,
     client: Client,
+    /// The version the next save is conditional on. Held here rather than in
+    /// the saver, so two savers taken from one invitation cannot each think
+    /// they are saving over what was read at the start.
+    etag: Rc<RefCell<Option<String>>>,
 }
 
 impl Invitation {
@@ -120,6 +124,10 @@ impl Invitation {
     /// admitted this recipient, so there is nothing for an application to
     /// assemble and nothing it can get wrong.
     ///
+    /// One call per session. A second one opens a second socket into the same
+    /// room, and the peer would then see its own edits arrive as somebody
+    /// else's.
+    ///
     /// An error here is not a reason to refuse the document. The recipient
     /// came to read one document and they have it. A caller says so in
     /// passing and carries on.
@@ -136,7 +144,7 @@ impl Invitation {
         if self.read_only() {
             return None;
         }
-        Some(Saver { client: self.client.clone(), etag: Rc::new(RefCell::new(self.join.etag.clone())) })
+        Some(Saver { client: self.client.clone(), etag: Rc::clone(&self.etag) })
     }
 }
 
@@ -216,6 +224,7 @@ pub async fn arrive_through(client: Client) -> Arrival {
             name: join.name.clone(),
             recipient: join.recipient.clone(),
             permission: join.permission,
+            etag: Rc::new(RefCell::new(join.etag.clone())),
             join,
             client,
         }),
