@@ -20,10 +20,15 @@ unsafe_code = "forbid"
 dbg_macro = "warn"
 todo = "warn"
 
-# The contracts come from craft-libs, pinned. Everything that reaches a
-# wire lives here, beside the service that calls it.
+# The contracts come from craft-libs, pinned once for the whole workspace.
+# Everything that reaches a wire lives here, beside the service that calls it.
+#
+# Both craft-libs crates are pinned to the same revision deliberately.
+# craft-ui speaks the craft-cloud vocabulary, so two revisions put two
+# `Permission` types in one binary and nothing can be passed between them.
 [workspace.dependencies]
-craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "183056e" }
+craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "289d562cc6e8b567819aee51f759a78f41a65454" }
+craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "289d562cc6e8b567819aee51f759a78f41a65454" }
 craft-collab = { path = "crates/collab" }
 craft-cloud-client = { path = "crates/cloud-client" }
 craft-nextcloud = { path = "crates/nextcloud" }
