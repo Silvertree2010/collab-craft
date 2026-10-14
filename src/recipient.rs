@@ -63,7 +63,7 @@ pub async fn land(State(app): State<Arc<App>>, Path(raw): Path<String>) -> Respo
     // The provider decides, every time. Checking only at minting would leave a
     // withdrawn share openable by anybody still holding the mail.
     let permission = match grant(&app, &link).await {
-        Ok(p) => p,
+        Ok((_, p)) => p,
         Err(e) => return refuse(&e, StatusCode::FORBIDDEN),
     };
 
@@ -101,25 +101,34 @@ pub async fn land(State(app): State<Arc<App>>, Path(raw): Path<String>) -> Respo
     response
 }
 
-/// What the provider still grants a recipient for one link.
+/// What the provider still grants a recipient for one link, and the document
+/// it grants.
 ///
 /// Reads the document and its shares as the sharer, because the recipient has
 /// no account to read them as. A sharer who has since unlinked their account
 /// leaves nothing able to answer, so the key stops working.
-async fn grant(app: &App, link: &Link) -> Result<Permission, Refusal> {
+///
+/// The entry comes back as well as the permission. A recipient has no file
+/// list, so this is the only place the document's name and its current version
+/// can come from, and both are read here rather than remembered when the link
+/// was minted. A document renamed since then is still the same document.
+async fn grant(app: &App, link: &Link) -> Result<(craft_cloud::Entry, Permission), Refusal> {
     let Some(provider) = app.provider_for_owner(&link.owner).await else {
         return Err(Refusal::Withdrawn);
     };
     let doc = link.doc.clone();
-    let answer = tokio::task::spawn_blocking(move || -> craft_cloud::Result<(String, Vec<craft_cloud::Share>)> {
+    let answer = tokio::task::spawn_blocking(move || -> craft_cloud::Result<(craft_cloud::Entry, Vec<craft_cloud::Share>)> {
         let entry = provider.stat(&doc)?;
         let shares = provider.shares(&doc)?;
-        Ok((entry.room, shares))
+        Ok((entry, shares))
     })
     .await;
 
     match answer {
-        Ok(Ok((room, shares))) => keyed::regrant(link, &room, &shares),
+        Ok(Ok((entry, shares))) => {
+            let permission = keyed::regrant(link, &entry.room, &shares)?;
+            Ok((entry, permission))
+        }
         Ok(Err(e)) => {
             tracing::warn!(error = %e, link = %link.share, "the provider would not say whether a share still stands");
             Err(Refusal::Withdrawn)
@@ -136,7 +145,7 @@ async fn grant(app: &App, link: &Link) -> Result<Permission, Refusal> {
 /// Re-reads the link record as well as the share. The record is what
 /// withdrawal deletes, so a session outliving it must stop working, and this
 /// is the one place every recipient route passes through.
-async fn standing(app: &App, guest: &Guest) -> Result<(Link, Permission), Refusal> {
+async fn standing(app: &App, guest: &Guest) -> Result<(Link, craft_cloud::Entry, Permission), Refusal> {
     let Some(link) = app.store.keyed_link(&guest.link).await else {
         return Err(Refusal::Unknown);
     };
@@ -146,8 +155,8 @@ async fn standing(app: &App, guest: &Guest) -> Result<(Link, Permission), Refusa
     if link.exp <= now_unix() {
         return Err(Refusal::Expired { exp: link.exp, now: now_unix() });
     }
-    let permission = grant(app, &link).await?;
-    Ok((link, permission))
+    let (entry, permission) = grant(app, &link).await?;
+    Ok((link, entry, permission))
 }
 
 /// Turn a refusal into the JSON an app can act on.
@@ -165,6 +174,13 @@ fn not_a_recipient() -> Response {
     (StatusCode::NOT_FOUND, Json(ApiError { code: "not_a_recipient", detail: "this route is for a shared link".to_owned() })).into_response()
 }
 
+/// Everything a recipient's application needs before it can show them
+/// anything.
+///
+/// One answer rather than four routes. A browser build asks this once on
+/// startup, and the answer either says this is a keyed link or refuses. An app
+/// that had to assemble the name, the version, the permission and the room
+/// from separate calls would have four chances to half-open a document.
 #[derive(Serialize)]
 pub struct Join {
     pub token: String,
@@ -174,6 +190,18 @@ pub struct Join {
     /// can present a read-only document as read-only rather than discovering
     /// it when the relay refuses an edit.
     pub permission: Permission,
+    /// What to call the document. A recipient has no file list, so this is the
+    /// only place the name can come from, and it is read from the provider on
+    /// this request rather than remembered from the minting.
+    pub name: String,
+    /// The version the document is at now. A recipient's save is conditional
+    /// on this, so work saved between their read and their save refuses the
+    /// write rather than being overwritten.
+    pub etag: Option<String>,
+    /// The address this link was minted for. Sent so a title bar can say who
+    /// the document was shared with. A recipient has no account anywhere, so
+    /// there is no account menu to draw and nothing to sign out of.
+    pub recipient: String,
 }
 
 /// A relay token for the one room a recipient's key names.
@@ -182,13 +210,22 @@ pub struct Join {
 /// signed-in user against the provider, and a recipient is not one.
 pub async fn token(State(app): State<Arc<App>>, session: Session) -> Response {
     let Some(guest) = session.guest.as_ref() else { return not_a_recipient() };
-    let (link, permission) = match standing(&app, guest).await {
+    let (link, entry, permission) = match standing(&app, guest).await {
         Ok(v) => v,
         Err(e) => return refuse_json(&e),
     };
 
     match app.mint_token(&session, &link.room, permission) {
-        Ok(token) => Json(Join { token, relay: app.relay_url.clone(), room: link.room, permission }).into_response(),
+        Ok(token) => Json(Join {
+            token,
+            relay: app.relay_url.clone(),
+            room: link.room,
+            permission,
+            name: entry.name,
+            etag: entry.etag,
+            recipient: link.recipient,
+        })
+        .into_response(),
         Err(detail) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { code: "mint_failed", detail })).into_response(),
     }
 }
@@ -196,7 +233,7 @@ pub async fn token(State(app): State<Arc<App>>, session: Session) -> Response {
 /// The document's bytes, read as the sharer.
 pub async fn read(State(app): State<Arc<App>>, session: Session) -> Response {
     let Some(guest) = session.guest.as_ref() else { return not_a_recipient() };
-    let (link, _) = match standing(&app, guest).await {
+    let (link, _, _) = match standing(&app, guest).await {
         Ok(v) => v,
         Err(e) => return refuse_json(&e),
     };
@@ -223,7 +260,7 @@ pub struct WriteQuery {
 /// Replace the document's bytes, if the share still allows it.
 pub async fn write(State(app): State<Arc<App>>, session: Session, Query(q): Query<WriteQuery>, body: axum::body::Bytes) -> Response {
     let Some(guest) = session.guest.as_ref() else { return not_a_recipient() };
-    let (link, permission) = match standing(&app, guest).await {
+    let (link, _, permission) = match standing(&app, guest).await {
         Ok(v) => v,
         Err(e) => return refuse_json(&e),
     };
@@ -258,18 +295,26 @@ pub async fn write(State(app): State<Arc<App>>, session: Session, Query(q): Quer
 /// Nothing in this page names the provider, carries a credential or carries
 /// the key. The session cookie rides the response header, and the session id
 /// in the scheme URL never leaves the recipient's own machine.
-fn handoff(app_slug: &str, session_id: &str, base: &str) -> String {
+///
+/// The browser target carries `?invite`, which grants nothing and proves
+/// nothing. The cookie is the whole of the authority. It only tells the app
+/// build that a keyed link is why it was loaded, so a service that cannot be
+/// reached is reported to the recipient rather than mistaken for an ordinary
+/// visit. Without it a network blip shows somebody an empty document and no
+/// reason for it, and that is the one outcome worse than a plain refusal. See
+/// `craft_cloud_client::invite`.
+pub(crate) fn handoff(app_slug: &str, session_id: &str, base: &str) -> String {
     let slug = escape(app_slug);
     let target = format!("craft+{app_slug}://join?service={}&session={session_id}", crate::session::urlencode(base));
     let scheme = serde_json::to_string(&target).unwrap_or_else(|_| "\"\"".to_owned());
-    let web = serde_json::to_string(&format!("/{app_slug}/")).unwrap_or_else(|_| "\"\"".to_owned());
+    let web = serde_json::to_string(&format!("/{app_slug}/?invite")).unwrap_or_else(|_| "\"\"".to_owned());
     format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
          <title>Opening the document</title></head>\
          <body><p>Opening the document.</p>\
-         <p><a id=\"here\" href=\"/{slug}/\">Open it in this browser instead</a></p>\
+         <p><a id=\"here\" href=\"/{slug}/?invite\">Open it in this browser instead</a></p>\
          <iframe id=\"handoff\" hidden></iframe>\
          <script>\
          (function(){{\

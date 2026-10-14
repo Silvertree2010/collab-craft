@@ -629,6 +629,59 @@ mod keyed_links {
         }
     }
 
+    // ---- what the app build is handed ----------------------------------------
+
+    #[test]
+    fn the_handoff_sends_a_browser_to_the_app_build_and_says_a_link_sent_it() {
+        let page = crate::recipient::handoff("gridcraft", "session-abc", "https://craft.example.com");
+        // The browser fallback and the link beside it go to the same place, so
+        // somebody who presses the link rather than waiting gets the same
+        // page. The marker says a keyed link is why, which is what lets the
+        // build tell an unreachable service from an ordinary visit.
+        assert!(page.contains("/gridcraft/?invite"), "the fallback carries the marker: {page}");
+        assert_eq!(page.matches("/gridcraft/?invite").count(), 2, "the script target and the link agree");
+        assert!(page.contains("craft+gridcraft://join"), "the installed app is tried first");
+    }
+
+    #[test]
+    fn the_handoff_marker_carries_nothing_but_itself() {
+        // It is one word on a query string. Anybody can type it, and the
+        // service reads the cookie it set rather than anything in the URL. The
+        // test exists so nobody later reads the marker as an authority, and so
+        // the session id cannot be appended to it by a later edit.
+        let page = crate::recipient::handoff("wordcraft", "session-abc", "https://craft.example.com");
+        assert!(page.contains("/wordcraft/?invite\""), "the marker stands alone on the query");
+        assert_eq!(page.matches("session-abc").count(), 1, "the session id appears once, in the scheme URL");
+        let after_marker: Vec<&str> = page.split("/wordcraft/?invite").skip(1).collect();
+        for tail in after_marker {
+            assert!(!tail.starts_with('='), "nothing is appended to the marker");
+            assert!(!tail.starts_with('&'), "and nothing follows it on the query");
+        }
+    }
+
+    #[test]
+    fn the_token_answer_carries_what_an_app_needs_before_it_draws() {
+        // The shape `craft_cloud_client::InviteJoin` reads. A recipient has no
+        // file list, so the name, the version and the address they were
+        // written to can come from nowhere else.
+        let answer = crate::recipient::Join {
+            token: "relay-token".to_owned(),
+            relay: "https://relay.example.com".to_owned(),
+            room: "room-7".to_owned(),
+            permission: Permission::View,
+            name: "Budget.xlsx".to_owned(),
+            etag: Some("v3".to_owned()),
+            recipient: "outsider@example.org".to_owned(),
+        };
+        let wire = serde_json::to_value(&answer).expect("it serialises");
+        assert_eq!(wire["name"], json!("Budget.xlsx"));
+        assert_eq!(wire["etag"], json!("v3"));
+        assert_eq!(wire["recipient"], json!("outsider@example.org"));
+        assert_eq!(wire["permission"], json!("view"));
+        assert!(wire.get("doc").is_none(), "the provider's handle is never sent to a recipient");
+        assert!(wire.get("owner").is_none(), "nor is the sharer's account");
+    }
+
     // ---- against a live bus -----------------------------------------------
 
     /// The store half, which no pure function can cover.
