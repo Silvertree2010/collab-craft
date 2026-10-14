@@ -6,6 +6,11 @@
 #
 #   docker compose up -d
 #
+# This file assumes COLLABCRAFT_VALKEY_URL names a Redis-compatible server you
+# already run. A deployment with no bus of its own layers one on:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.valkey.yml up -d
+#
 # The browser builds are optional. Leave COLLABCRAFT_WEB_ROOT unset and the
 # service runs as an API and relay only, which is what you want if something
 # else already serves the WebAssembly.
@@ -45,26 +50,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
-    depends_on:
-      valkey:
-        condition: service_healthy
-
-  # Any Redis-compatible server will do. Point COLLABCRAFT_VALKEY_URL at one
-  # you already run and delete this service.
-  valkey:
-    image: ${COLLABCRAFT_VALKEY_IMAGE:-valkey/valkey:8-alpine}
-    container_name: collabcraft-valkey
-    restart: unless-stopped
-    # noeviction, because the sequence counters are not a cache. Losing one
-    # silently reorders every edit in that document.
-    command: ["valkey-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
-    volumes:
-      - valkey-data:/data
-    healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-volumes:
-  valkey-data:

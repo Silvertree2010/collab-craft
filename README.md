@@ -28,7 +28,7 @@ own.
 **The bus must not evict.** The sequence counters are not a cache. Losing one
 silently reorders every edit in that document. Clients then hold their edits,
 waiting for numbers that never arrive. Run it with
-`--maxmemory-policy noeviction`. The bundled compose file already does.
+`--maxmemory-policy noeviction`. The bus overlay below already does.
 
 ## Deploying
 
@@ -38,6 +38,15 @@ $EDITOR .env          # every variable is documented in place
 docker compose up -d
 curl -fsS http://127.0.0.1:9444/healthz
 ```
+
+That assumes `COLLABCRAFT_VALKEY_URL` names a Redis-compatible server you
+already run. A deployment with no bus of its own layers one on:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.valkey.yml up -d
+```
+
+Nothing else differs between the two arrangements.
 
 `/healthz` answers only once the bus is writable. A service that is up but
 cannot order an edit therefore fails the check.

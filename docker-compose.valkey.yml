@@ -1,0 +1,31 @@
+# A bus, for a deployment that does not already have one.
+#
+# Layer it over the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.valkey.yml up -d
+#
+# Leave it out when COLLABCRAFT_VALKEY_URL points at a Redis-compatible server
+# you already run. Nothing else changes between the two arrangements.
+services:
+  collabcraft:
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+  valkey:
+    image: ${COLLABCRAFT_VALKEY_IMAGE:-valkey/valkey:8-alpine}
+    container_name: collabcraft-valkey
+    restart: unless-stopped
+    # noeviction, because the sequence counters are not a cache. Losing one
+    # silently reorders every edit in that document.
+    command: ["valkey-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  valkey-data:
