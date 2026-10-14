@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 # The dialog's contract. No transport comes with it, which is the point.
-craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "194a7f1", features = ["share"] }
+craft-ui = { git = "https://github.com/wdunn001/craft-libs", rev = "effb5ca", features = ["share"] }
 craft-cloud = { workspace = true }
 craft-cloud-client = { workspace = true }
 

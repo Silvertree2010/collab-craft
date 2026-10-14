@@ -20,7 +20,7 @@ todo = "warn"
 # The contracts come from craft-libs, pinned. Everything that reaches a
 # wire lives here, beside the service that calls it.
 [workspace.dependencies]
-craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "194a7f1" }
+craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "effb5ca" }
 craft-collab = { path = "crates/collab" }
 craft-cloud-client = { path = "crates/cloud-client" }
 craft-nextcloud = { path = "crates/nextcloud" }
