@@ -928,6 +928,16 @@ mod web {
         assert_eq!(pages::who_may(&two), "Members of these groups: craft-admins, platform.");
     }
 
+    #[test]
+    fn a_refusal_says_what_the_sign_in_actually_carried() {
+        // The two reasons a person is refused are fixed in different places.
+        // Being in none of the named groups is a membership to change. A
+        // sign-in carrying no groups at all is usually a scope that was never
+        // bound to this application, and no amount of group editing fixes it.
+        assert_eq!(pages::carried(&signed_in(&[])), pages::NO_GROUPS);
+        assert_eq!(pages::carried(&signed_in(&["dunn-home-users", "app-collabcraft"])), "Your sign-in carried: dunn-home-users, app-collabcraft.");
+    }
+
     // ---- where the provider comes from --------------------------------------
 
     #[test]
