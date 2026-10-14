@@ -7,7 +7,10 @@ members = [".", "crates/nextcloud", "crates/collab", "crates/cloud-client", "cra
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-license = "AGPL-3.0-or-later"
+# The same terms the repository ships and the README states, and the same ones
+# the Craft applications use. These crates exist to be linked by those
+# applications. A copyleft licence here would reach every one of them.
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/wdunn001/collabcraft"
 
 [workspace.lints.rust]
@@ -42,7 +45,7 @@ name = "collabcraft-relay"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-license = "AGPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 description = "The CollabCraft relay: verifies Nextcloud-issued tokens, orders document edits and arbitrates scope locks"
 repository = "https://github.com/wdunn001/collabcraft"
 
