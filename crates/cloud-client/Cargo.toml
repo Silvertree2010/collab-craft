@@ -37,8 +37,17 @@ ureq = { version = "3", features = ["platform-verifier"] }
 # The browser transport. The page's own fetch, through the bindings the browser
 # already has. No certificate store and no root list here: the browser settled
 # which certificates it trusts before the page loaded.
+#
+# craft-collab is here and not above because of `invite`, which is the whole of
+# what a browser build does when somebody with no account follows a share. The
+# service answers that in one call: the document, the permission, the room and
+# the relay token. Joining the room is therefore part of the same flow, and
+# leaving the socket out would have each of the twelve apps assemble it again.
+# A desktop build never follows that path, so it carries none of this.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+craft-collab = { workspace = true, features = ["web-hub"] }
 js-sys = { workspace = true }
+log = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true, features = [
@@ -47,6 +56,9 @@ web-sys = { workspace = true, features = [
   "Document",
   "Element",
   "Headers",
+  "HtmlElement",
+  "Location",
+  "Node",
   "Request",
   "RequestCredentials",
   "RequestInit",

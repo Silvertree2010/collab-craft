@@ -237,11 +237,35 @@ fn the_app_list_is_the_services_answer() {
 
 #[test]
 fn a_recipient_asks_for_a_token_on_the_invite_route() {
-    let fake = Fake::one(200, r#"{"token":"jwt","relay":"https://relay.example.com","room":"fid-9","permission":"view"}"#);
+    let fake = Fake::one(
+        200,
+        r#"{"token":"jwt","relay":"https://relay.example.com","room":"fid-9","permission":"view",
+            "name":"Budget.xlsx","etag":"v3","recipient":"outsider@example.org"}"#,
+    );
     let joined = client(&fake).invite_token().unwrap();
     assert_eq!(fake.last().url, "https://craft.example.com/api/v1/invite/token");
     assert_eq!(joined.room, "fid-9");
     assert_eq!(joined.permission, Permission::View, "the service decides this per request, and a read-only document must open as one");
+    // What a recipient has instead of a file list and an account. All three
+    // come from the service on this request, so a renamed document opens
+    // under the name it has now.
+    assert_eq!(joined.name, "Budget.xlsx");
+    assert_eq!(joined.etag.as_deref(), Some("v3"), "the first save is conditional on this");
+    assert_eq!(joined.recipient, "outsider@example.org");
+}
+
+#[test]
+fn a_provider_without_versions_still_admits_a_recipient() {
+    // A provider with no etags leaves the field out. The document still opens;
+    // only the condition on a save is missing.
+    let fake = Fake::one(
+        200,
+        r#"{"token":"jwt","relay":"https://relay.example.com","room":"fid-9","permission":"edit",
+            "name":"Notes.docx","recipient":"outsider@example.org"}"#,
+    );
+    let joined = client(&fake).invite_token().unwrap();
+    assert_eq!(joined.etag, None);
+    assert_eq!(joined.name, "Notes.docx");
 }
 
 #[test]

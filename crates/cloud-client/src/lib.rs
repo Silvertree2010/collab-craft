@@ -39,6 +39,14 @@ mod native;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
+/// Landing on a keyed link: the whole of what a browser build does when
+/// somebody with no account follows a share.
+///
+/// Browser only. A desktop app is handed its session by the landing page's own
+/// scheme URL and never follows this path.
+#[cfg(target_arch = "wasm32")]
+pub mod invite;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{Client, Transport};
 #[cfg(target_arch = "wasm32")]
@@ -96,15 +104,27 @@ pub struct Join {
 
 /// The same, for somebody who arrived on a keyed link.
 ///
-/// Carries the permission as well. The service decides that on the request
-/// rather than from the session, and a UI presents a read-only document as
-/// read-only rather than discovering it when the relay refuses an edit.
+/// Carries everything the recipient's application needs before it can show
+/// them anything. The service decides the permission on the request rather
+/// than from the session, and a UI presents a read-only document as read-only
+/// rather than discovering it when the relay refuses an edit.
 #[derive(Clone, Debug, Deserialize)]
 pub struct InviteJoin {
     pub token: String,
     pub relay: String,
     pub room: String,
     pub permission: Permission,
+    /// What to call the document. A recipient has no file list, so this is the
+    /// only place the name can come from.
+    pub name: String,
+    /// The version the document is at. A save is conditional on this, so work
+    /// saved between the read and the save refuses the write rather than
+    /// being overwritten.
+    #[serde(default)]
+    pub etag: Option<String>,
+    /// The address the link was minted for, so a title bar can say who the
+    /// document was shared with.
+    pub recipient: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
