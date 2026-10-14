@@ -310,6 +310,7 @@ mod keyed_links {
         Share {
             id: "share-99".to_owned(),
             target: ShareTarget::Email("outsider@example.org".to_owned()),
+            display: None,
             permission,
             url: None,
             note: None,
