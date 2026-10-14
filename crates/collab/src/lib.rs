@@ -42,10 +42,17 @@ mod session;
 #[cfg(feature = "native-hub")]
 pub mod native;
 
+/// A [`Hub`] over the JS `socket.io-client`, for a browser.
+///
+/// Behind a feature, because it reaches a global the page is expected to have
+/// put there and binds nothing at link time. A native build leaves it off.
+#[cfg(feature = "web-hub")]
+pub mod web;
+
 #[cfg(test)]
 mod tests;
 
 pub use error::{Error, Result};
-pub use hub::{Hub, decode, encode};
+pub use hub::{EVENTS, Hub, decode, emit, encode, receive};
 pub use proto::{ClientMsg, DocId, LockState, PeerId, Presence, Scope, ServerMsg};
 pub use session::{Effect, Session};
