@@ -867,11 +867,31 @@ pub fn who_may(app: &App) -> String {
 fn refuse_configure(app: &App, session: &Session) -> Response {
     let body = format!(
         "<h1>Not yours to change</h1><p class=\"lede\">The cloud provider for this deployment is set by group membership \
-         at the identity provider.</p><section class=\"panel\"><p>{}</p>\
+         at the identity provider.</p><section class=\"panel\"><p>{}</p><p class=\"hint\">{}</p>\
          <div class=\"row\"><a class=\"btn quiet\" href=\"/account\">Back to your account</a></div></section>",
-        escape(&who_may(app))
+        escape(&who_may(app)),
+        escape(&carried(session))
     );
     (StatusCode::FORBIDDEN, Html(layout("Cloud provider", Some(session), &body))).into_response()
+}
+
+/// What a sign-in carrying no groups at all is told.
+///
+/// Named so the page and its test cannot drift apart on a sentence.
+pub const NO_GROUPS: &str =
+    "Your sign-in carried no groups at all. Either you are in none, or this application is not asking the identity provider for them.";
+
+/// What the identity provider said this person is in.
+///
+/// A deployment whose groups scope is not bound to this application sends no
+/// groups at all. That looks exactly like somebody who is in none of them. The
+/// two are fixed in different places, so saying which one it is turns an hour
+/// of guessing into a glance.
+pub fn carried(session: &Session) -> String {
+    if session.groups.is_empty() {
+        return NO_GROUPS.to_owned();
+    }
+    format!("Your sign-in carried: {}.", session.groups.join(", "))
 }
 
 // ---- forms that prove where they came from --------------------------------
